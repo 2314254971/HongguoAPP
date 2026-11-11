@@ -12,6 +12,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import android.util.TypedValue
 import android.view.GestureDetector
 import android.view.Gravity
@@ -90,6 +91,9 @@ class PlayerActivity : Activity() {
     /** 已经是"第几集 → 已解开的流"；切集时直接复用，避免再等一次网络解析。 */
     private var prefetched: Pair<Int, OpenedStream>? = null
     private var prefetchingIndex = -1
+
+    /** 用户已经切到某一集，但这一集正在后台预解析：等它回来直接接管，不要再发一次请求。 */
+    private var pendingIndex = -1
 
     /** 预解析窗口：初始 3 秒，按实测解析耗时的 EMA 自动调整。 */
     private val prefetchPolicy = PrefetchPolicy()
@@ -398,6 +402,8 @@ class PlayerActivity : Activity() {
         updateHeader()
         errorView.visibility = View.GONE
 
+        pendingIndex = -1
+
         // 已经预解析好这一集：直接接管，不再显示"正在解析"。
         prefetched?.let { cached ->
             if (cached.first != newIndex) {
@@ -409,14 +415,25 @@ class PlayerActivity : Activity() {
         if (ready != null) {
             prefetched = null
             loadingBox.visibility = View.GONE
+            Log.d(TAG, "prefetch hit ep=${newIndex + 1}")
             attach(ready, newIndex, resume)
-            prefetchNext()
+            // 不再立刻解析再下一集：交给时间窗口判定，避免"刚开播就多发一次请求"。
+            return
+        }
+
+        // 这一集的预解析还在路上：只等它，不要重复发起。
+        if (prefetchingIndex == newIndex) {
+            pendingIndex = newIndex
+            loadingBox.visibility = View.VISIBLE
+            centerPlay.visibility = View.GONE
+            Log.d(TAG, "wait prefetch ep=${newIndex + 1}")
             return
         }
 
         loadingBox.visibility = View.VISIBLE
         centerPlay.visibility = View.GONE
         val episodeId = episodes[newIndex]
+        Log.d(TAG, "resolve blocking ep=${newIndex + 1} id=$episodeId")
         val startedAt = SystemClock.elapsedRealtime()
         io.execute {
             val result = runCatching {
@@ -511,6 +528,8 @@ class PlayerActivity : Activity() {
      * 所以 2 倍速时窗口会自动翻倍；拖动进度后由 onStopTrackingTouch 立即触发一次。
      */
     private fun maybePrefetch() {
+        // 还在等当前集的预解析结果时，不要再去解析下一集，避免抢带宽和重复请求。
+        if (pendingIndex != -1) return
         val next = index + 1
         if (next >= episodes.size) return
         if (prefetched?.first == next || prefetchingIndex == next) return
@@ -662,8 +681,8 @@ class PlayerActivity : Activity() {
         if (next >= episodes.size) return
         if (prefetched?.first == next || prefetchingIndex == next) return
         prefetchingIndex = next
-        val tone = requestId
         val startedAt = SystemClock.elapsedRealtime()
+        Log.d(TAG, "resolve prefetch ep=${next + 1}")
         io.execute {
             val result = runCatching {
                 PlaybackResolver.open(application as App, episodes[next]).also { stream ->
@@ -681,15 +700,33 @@ class PlayerActivity : Activity() {
                 result.onSuccess { stream ->
                     // 预热也算进耗时，窗口按"实际从发起到可用"来估。
                     prefetchPolicy.recordResolve(elapsed)
-                    if (tone == requestId && index + 1 == next) {
-                        prefetched?.second?.close()
-                        prefetched = next to stream
-                    } else {
-                        stream.close()
+                    when {
+                        // 用户已经切到这一集：直接接管，这次预解析就是它的解析。
+                        next == index && pendingIndex == next -> {
+                            pendingIndex = -1
+                            loadingBox.visibility = View.GONE
+                            errorView.visibility = View.GONE
+                            Log.d(TAG, "prefetch handoff ep=${next + 1}")
+                            attach(stream, next, resume = false)
+                        }
+                        // 还是下一集：存起来等切换。
+                        next == index + 1 -> {
+                            prefetched?.second?.close()
+                            prefetched = next to stream
+                        }
+                        else -> {
+                            Log.d(TAG, "discard stale prefetch ep=${next + 1}")
+                            stream.close()
+                        }
                     }
                 }.onFailure {
                     // 失败不要每 500ms 撞一次接口，冷却 2.5 秒再试。
                     prefetchCooldownUntil = SystemClock.elapsedRealtime() + 2_500
+                    if (next == index && pendingIndex == next) {
+                        pendingIndex = -1
+                        Log.d(TAG, "prefetch failed, fallback ep=${next + 1}")
+                        play(next, resume = false)
+                    }
                 }
             }
         }
@@ -819,5 +856,6 @@ class PlayerActivity : Activity() {
         const val EXTRA_EPISODES = "episode_ids"
         const val EXTRA_INDEX = "episode_index"
         private const val KEY_SPEED = "speed"
+        private const val TAG = "HGPlayer"
     }
 }
