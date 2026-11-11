@@ -4,53 +4,53 @@ package com.hongguo.mobile.ui
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
-import android.graphics.BitmapFactory
+import android.graphics.Typeface
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.os.SystemClock
 import android.view.View
-import android.widget.ImageView
 import android.widget.TextView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.hongguo.mobile.App
 import com.hongguo.mobile.R
-import com.hongguotv.core.AccountCredentials
+import com.hongguo.mobile.data.HistoryEntry
 import com.hongguotv.core.Series
-import com.hongguotv.core.WebLogin
 import java.util.concurrent.Executors
 
 /**
- * 账号页：未登录时展示官方扫码登录，登录后展示云端收藏。
- * 二维码由红果官网登录流程生成，会话 Cookie 加密存本机。
+ * 我的：登录状态 + 收藏/历史两个页签。
+ * 先渲染缓存，超过 5 分钟或手动刷新才请求网络；列表按页追加，不一次性铺满。
  */
 class AccountActivity : Activity() {
 
+    private enum class Tab { FAVORITES, HISTORY }
+
     private val io = Executors.newSingleThreadExecutor()
-    private val handler = Handler(Looper.getMainLooper())
     private val app get() = application as App
 
-    private lateinit var loginPanel: View
-    private lateinit var accountPanel: View
-    private lateinit var qrImage: ImageView
-    private lateinit var status: TextView
-    private lateinit var refresh: TextView
-    private lateinit var nickname: TextView
-    private lateinit var count: TextView
-    private lateinit var empty: TextView
-    private lateinit var grid: RecyclerView
+    private lateinit var listView: RecyclerView
     private lateinit var loading: View
-    private lateinit var adapter: SeriesAdapter
+    private lateinit var empty: TextView
+    private lateinit var nameView: TextView
+    private lateinit var subView: TextView
+    private lateinit var loginBtn: TextView
+    private lateinit var logoutBtn: TextView
+    private lateinit var tabFavorites: TextView
+    private lateinit var tabHistory: TextView
+    private lateinit var refreshBtn: TextView
 
-    private var login: WebLogin? = null
-    private var pollTask: Runnable? = null
-    private var generation = 0
-    private var deadline = 0L
-    private var pollInFlight = false
+    private lateinit var seriesAdapter: SeriesAdapter
+    private lateinit var historyAdapter: HistoryAdapter
+
+    private var tab = Tab.FAVORITES
+    private var favorites: List<Series> = emptyList()
+    private var history: List<HistoryEntry> = emptyList()
+    private var favoritesShown = 0
+    private var historyShown = 0
+    private var refreshing = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -58,189 +58,236 @@ class AccountActivity : Activity() {
         setContentView(R.layout.activity_account)
         applySystemBarPadding(findViewById(R.id.root))
 
-        loginPanel = findViewById(R.id.loginPanel)
-        accountPanel = findViewById(R.id.accountPanel)
-        qrImage = findViewById(R.id.qrImage)
-        status = findViewById(R.id.status)
-        refresh = findViewById(R.id.refresh)
-        nickname = findViewById(R.id.nickname)
-        count = findViewById(R.id.count)
-        empty = findViewById(R.id.empty)
-        grid = findViewById(R.id.grid)
+        listView = findViewById(R.id.list)
         loading = findViewById(R.id.loading)
+        empty = findViewById(R.id.empty)
+        nameView = findViewById(R.id.name)
+        subView = findViewById(R.id.sub)
+        loginBtn = findViewById(R.id.loginBtn)
+        logoutBtn = findViewById(R.id.logoutBtn)
+        tabFavorites = findViewById(R.id.tabFavorites)
+        tabHistory = findViewById(R.id.tabHistory)
+        refreshBtn = findViewById(R.id.refreshBtn)
 
-        adapter = SeriesAdapter { openDetail(it) }
-        grid.layoutManager = GridLayoutManager(this, 3)
-        grid.adapter = adapter
+        seriesAdapter = SeriesAdapter { openDetail(it.id, it.title, it.cover, -1, 0L) }
+        historyAdapter = HistoryAdapter {
+            openDetail(it.series.id, it.series.title, it.series.cover, it.episodeIndex, it.position)
+        }
+
+        listView.layoutManager = GridLayoutManager(this, FAVORITE_COLUMNS)
+        listView.adapter = seriesAdapter
+        listView.addOnScrollListener(
+            object : RecyclerView.OnScrollListener() {
+                override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                    if (dy <= 0) return
+                    val manager = recyclerView.layoutManager ?: return
+                    val last = if (manager is GridLayoutManager) {
+                        manager.findLastVisibleItemPosition()
+                    } else {
+                        (manager as LinearLayoutManager).findLastVisibleItemPosition()
+                    }
+                    val total = recyclerView.adapter?.itemCount ?: return
+                    if (last >= total - 5) loadMore()
+                }
+            },
+        )
 
         findViewById<View>(R.id.backBtn).setOnClickListener { finish() }
-        refresh.setOnClickListener { startQr() }
-        findViewById<View>(R.id.logout).setOnClickListener { confirmLogout() }
+        tabFavorites.setOnClickListener { switchTab(Tab.FAVORITES) }
+        tabHistory.setOnClickListener { switchTab(Tab.HISTORY) }
+        loginBtn.setOnClickListener { startActivity(Intent(this, LoginActivity::class.java)) }
+        refreshBtn.setOnClickListener { refresh(tab) }
+        logoutBtn.setOnClickListener { confirmLogout() }
+    }
 
-        if (app.account.isLoggedIn) {
-            showAccount()
-            loadFavorites(refresh = true)
-        } else {
-            showLogin()
-            startQr()
-        }
+    override fun onResume() {
+        super.onResume()
+        updateHeader()
+        loadFromCache()
+        ensureFresh(tab, force = false)
     }
 
     override fun onDestroy() {
-        generation++
-        handler.removeCallbacksAndMessages(null)
-        login?.cancel()
-        login = null
         io.shutdownNow()
         super.onDestroy()
     }
 
-    // ---------------- 登录 ----------------
+    // ---------------- 数据 ----------------
 
-    private fun startQr() {
-        generation++
-        pollTask?.let { handler.removeCallbacks(it) }
-        pollTask = null
-        login?.cancel()
-        showLogin()
-        loading.visibility = View.VISIBLE
-        qrImage.visibility = View.INVISIBLE
-        refresh.visibility = View.GONE
+    private fun updateHeader() {
+        val loggedIn = app.account.isLoggedIn
+        nameView.text = if (loggedIn) app.account.nickname.ifBlank { "已登录" } else "未登录"
+        subView.text =
+            if (loggedIn) "云端收藏与观看历史已同步"
+            else "登录后同步云端收藏；历史先记录本机观看"
+        loginBtn.visibility = if (loggedIn) View.GONE else View.VISIBLE
+        logoutBtn.visibility = if (loggedIn) View.VISIBLE else View.GONE
+    }
 
-        val web = WebLogin(app.http)
-        login = web
-        val tone = generation
+    private fun loadFromCache() {
+        val localFavorites = app.library.favorites()
+        favorites =
+            if (app.account.isLoggedIn) merge(localFavorites, app.account.cachedFavorites())
+            else localFavorites
+        history =
+            if (app.account.isLoggedIn) app.account.cachedHistory()
+            else localHistory()
+        render(reset = true)
+    }
+
+    private fun localHistory(): List<HistoryEntry> =
+        app.library.recent().map {
+            HistoryEntry(
+                series = Series(id = it.seriesId, title = it.title, cover = it.cover),
+                episodeIndex = it.index,
+                position = it.position,
+                duration = it.duration,
+                updatedAt = it.updatedAt,
+            )
+        }
+
+    private fun merge(local: List<Series>, cloud: List<Series>): List<Series> =
+        (local + cloud).distinctBy { it.id }
+
+    private fun ensureFresh(target: Tab, force: Boolean) {
+        if (!app.account.isLoggedIn) return
+        val now = System.currentTimeMillis()
+        val last =
+            if (target == Tab.FAVORITES) app.account.favoritesRefreshedAt()
+            else app.account.historyRefreshedAt()
+        if (!force && now - last < CACHE_TTL_MS) return
+        refresh(target)
+    }
+
+    private fun refresh(target: Tab) {
+        if (refreshing) return
+        refreshing = true
+        if (currentEmpty()) {
+            loading.visibility = View.VISIBLE
+            empty.visibility = View.GONE
+        }
         io.execute {
-            val result = runCatching { web.qr() }
-            runOnUiThread {
-                if (tone != generation || isFinishing || isDestroyed) return@runOnUiThread
-                loading.visibility = View.GONE
-                result.onSuccess { qr ->
-                    val bitmap = BitmapFactory.decodeByteArray(qr.image, 0, qr.image.size)
-                    if (bitmap == null) {
-                        status.text = "二维码无法显示，请刷新"
-                        refresh.visibility = View.VISIBLE
-                        return@runOnUiThread
+            if (target == Tab.FAVORITES) {
+                val result = runCatching { app.account.refreshFavorites() }
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    refreshing = false
+                    loading.visibility = View.GONE
+                    result.onSuccess { cloud ->
+                        favorites = merge(app.library.favorites(), cloud)
+                        if (tab == Tab.FAVORITES) render(reset = true)
+                    }.onFailure {
+                        if (currentEmpty()) showEmpty("收藏读取失败：${it.message ?: "请稍后重试"}")
                     }
-                    qrImage.setImageBitmap(bitmap)
-                    qrImage.visibility = View.VISIBLE
-                    status.text = "扫码后在手机上确认登录"
-                    deadline = SystemClock.elapsedRealtime() + qr.expiresIn.coerceIn(1, 300) * 1000L
-                    startPolling(web, tone)
-                }.onFailure {
-                    status.text = "二维码获取失败：${it.message ?: "请重试"}"
-                    refresh.visibility = View.VISIBLE
+                    // 刷新期间切到了另一个页签：把它补上。
+                    if (tab != Tab.FAVORITES) ensureFresh(tab, force = false)
                 }
-            }
-        }
-    }
-
-    private fun startPolling(web: WebLogin, tone: Int) {
-        val task = object : Runnable {
-            override fun run() {
-                val self = this
-                if (tone != generation || isFinishing || isDestroyed) return
-                if (SystemClock.elapsedRealtime() >= deadline) {
-                    status.text = "二维码已过期，请刷新"
-                    refresh.visibility = View.VISIBLE
-                    return
-                }
-                if (pollInFlight) {
-                    handler.postDelayed(self, 500)
-                    return
-                }
-                pollInFlight = true
-                io.execute {
-                    val result = runCatching { if (web.poll()) web.credentials() else null }
-                    runOnUiThread {
-                        pollInFlight = false
-                        if (tone != generation || isFinishing || isDestroyed) return@runOnUiThread
-                        result.onSuccess { credentials ->
-                            if (credentials != null) completeLogin(credentials)
-                            else handler.postDelayed(self, 1500)
-                        }.onFailure {
-                            handler.postDelayed(self, 2000)
-                        }
+            } else {
+                val result = runCatching { app.account.refreshHistory() }
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    refreshing = false
+                    loading.visibility = View.GONE
+                    result.onSuccess { rows ->
+                        history = rows
+                        if (tab == Tab.HISTORY) render(reset = true)
+                    }.onFailure {
+                        if (currentEmpty()) showEmpty("历史读取失败：${it.message ?: "请稍后重试"}")
                     }
-                }
-            }
-        }
-        pollTask = task
-        handler.postDelayed(task, 1200)
-    }
-
-    private fun completeLogin(web: AccountCredentials) {
-        generation++
-        pollTask?.let { handler.removeCallbacks(it) }
-        pollTask = null
-        login?.cancel()
-        login = null
-        loading.visibility = View.VISIBLE
-        status.text = "已确认，正在初始化账号…"
-
-        val tone = generation
-        io.execute {
-            val result = runCatching { app.account.completeLogin(web) }
-            runOnUiThread {
-                if (tone != generation || isFinishing || isDestroyed) return@runOnUiThread
-                loading.visibility = View.GONE
-                result.onSuccess { profile ->
-                    toast("已登录 ${profile.nickname}")
-                    showAccount()
-                    loadFavorites(refresh = true)
-                }.onFailure {
-                    status.text = "登录失败：${it.message ?: "请重试"}"
-                    refresh.visibility = View.VISIBLE
+                    if (tab != Tab.HISTORY) ensureFresh(tab, force = false)
                 }
             }
         }
     }
 
-    // ---------------- 云端收藏 ----------------
+    private fun currentEmpty(): Boolean =
+        (tab == Tab.FAVORITES && favorites.isEmpty()) || (tab == Tab.HISTORY && history.isEmpty())
 
-    private fun loadFavorites(refresh: Boolean) {
-        val cached = app.account.cachedFavorites()
-        render(cached)
-        if (!refresh) return
-        io.execute {
-            val result = runCatching { app.account.refreshFavorites() }
-            runOnUiThread {
-                if (isFinishing || isDestroyed) return@runOnUiThread
-                result.onSuccess { render(it) }.onFailure {
-                    if (cached.isEmpty()) {
-                        empty.text = "云端收藏读取失败：${it.message ?: "请稍后重试"}"
-                        empty.visibility = View.VISIBLE
-                        grid.visibility = View.GONE
-                    }
-                }
+    private fun showEmpty(message: String) {
+        empty.text = message
+        empty.visibility = View.VISIBLE
+    }
+
+    // ---------------- 列表 ----------------
+
+    private fun render(reset: Boolean) {
+        if (tab == Tab.FAVORITES) {
+            if (reset) {
+                seriesAdapter.clear()
+                favoritesShown = minOf(PAGE_SIZE, favorites.size)
+                seriesAdapter.addAll(favorites.take(favoritesShown))
+            } else {
+                if (favoritesShown >= favorites.size) return
+                val next = favorites.drop(favoritesShown).take(PAGE_SIZE)
+                favoritesShown += next.size
+                seriesAdapter.addAll(next)
             }
+            updateEmptyState(
+                favorites.isEmpty(),
+                if (app.account.isLoggedIn) "还没有收藏" else "本机还没有收藏，去首页挑一部吧",
+            )
+        } else {
+            if (reset) {
+                historyAdapter.clear()
+                historyShown = minOf(PAGE_SIZE, history.size)
+                historyAdapter.addAll(history.take(historyShown))
+            } else {
+                if (historyShown >= history.size) return
+                val next = history.drop(historyShown).take(PAGE_SIZE)
+                historyShown += next.size
+                historyAdapter.addAll(next)
+            }
+            updateEmptyState(
+                history.isEmpty(),
+                if (app.account.isLoggedIn) "云端还没有观看记录" else "本机还没有观看记录",
+            )
         }
     }
 
-    private fun render(series: List<Series>) {
-        adapter.clear()
-        adapter.addAll(series)
-        count.text = "共 ${series.size} 部"
-        empty.text = "云端还没有收藏"
-        empty.visibility = if (series.isEmpty()) View.VISIBLE else View.GONE
-        grid.visibility = if (series.isEmpty()) View.GONE else View.VISIBLE
+    private fun updateEmptyState(isEmpty: Boolean, message: String) {
+        empty.text = message
+        empty.visibility = if (isEmpty && !refreshing) View.VISIBLE else View.GONE
     }
 
-    // ---------------- 状态切换 ----------------
-
-    private fun showLogin() {
-        loginPanel.visibility = View.VISIBLE
-        accountPanel.visibility = View.GONE
-        status.text = "正在生成二维码…"
-        refresh.visibility = View.GONE
-        loading.visibility = View.GONE
-        adapter.clear()
+    private fun loadMore() {
+        if (tab == Tab.FAVORITES) {
+            if (favoritesShown < favorites.size) render(reset = false)
+        } else {
+            if (historyShown < history.size) render(reset = false)
+        }
     }
 
-    private fun showAccount() {
-        loginPanel.visibility = View.GONE
-        accountPanel.visibility = View.VISIBLE
-        nickname.text = app.account.nickname.ifBlank { "已登录" }
+    private fun switchTab(target: Tab) {
+        if (tab == target) return
+        tab = target
+        val on = getColor(R.color.text)
+        val off = getColor(R.color.text_muted)
+        tabFavorites.setTextColor(if (target == Tab.FAVORITES) on else off)
+        tabFavorites.setTypeface(null, if (target == Tab.FAVORITES) Typeface.BOLD else Typeface.NORMAL)
+        tabHistory.setTextColor(if (target == Tab.HISTORY) on else off)
+        tabHistory.setTypeface(null, if (target == Tab.HISTORY) Typeface.BOLD else Typeface.NORMAL)
+
+        listView.layoutManager =
+            if (target == Tab.FAVORITES) GridLayoutManager(this, FAVORITE_COLUMNS)
+            else LinearLayoutManager(this)
+        listView.adapter = if (target == Tab.FAVORITES) seriesAdapter else historyAdapter
+        listView.scrollToPosition(0)
+        loading.visibility = if (refreshing && currentEmpty()) View.VISIBLE else View.GONE
+        render(reset = true)
+        ensureFresh(target, force = false)
+    }
+
+    // ---------------- 交互 ----------------
+
+    private fun openDetail(id: String, title: String, cover: String, index: Int, position: Long) {
+        startActivity(
+            Intent(this, DetailActivity::class.java)
+                .putExtra(DetailActivity.EXTRA_ID, id)
+                .putExtra(DetailActivity.EXTRA_TITLE, title)
+                .putExtra(DetailActivity.EXTRA_COVER, cover)
+                .putExtra(DetailActivity.EXTRA_START_INDEX, index)
+                .putExtra(DetailActivity.EXTRA_START_POSITION, position),
+        )
     }
 
     private fun confirmLogout() {
@@ -249,20 +296,11 @@ class AccountActivity : Activity() {
             .setMessage("退出后本机不再保留账号信息，本地收藏和观看进度不受影响。")
             .setPositiveButton("退出") { _, _ ->
                 app.account.logout()
-                showLogin()
-                startQr()
+                updateHeader()
+                loadFromCache()
             }
             .setNegativeButton("取消", null)
             .show()
-    }
-
-    private fun openDetail(series: Series) {
-        startActivity(
-            Intent(this, DetailActivity::class.java)
-                .putExtra(DetailActivity.EXTRA_ID, series.id)
-                .putExtra(DetailActivity.EXTRA_TITLE, series.title)
-                .putExtra(DetailActivity.EXTRA_COVER, series.cover),
-        )
     }
 
     private fun applySystemBarPadding(root: View) {
@@ -273,5 +311,11 @@ class AccountActivity : Activity() {
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
             insets
         }
+    }
+
+    private companion object {
+        const val FAVORITE_COLUMNS = 3
+        const val PAGE_SIZE = 30
+        const val CACHE_TTL_MS = 5 * 60 * 1000L
     }
 }

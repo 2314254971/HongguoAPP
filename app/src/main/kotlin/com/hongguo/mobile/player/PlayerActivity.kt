@@ -101,6 +101,8 @@ class PlayerActivity : Activity() {
     private var prefetchCooldownUntil = 0L
 
     private var playbackSpeed = 1f
+    private var initialIndex = 0
+    private var startPosition = 0L
     private lateinit var speedButton: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -112,6 +114,8 @@ class PlayerActivity : Activity() {
         cover = intent.getStringExtra(EXTRA_COVER).orEmpty()
         episodes = intent.getStringArrayListExtra(EXTRA_EPISODES) ?: arrayListOf()
         index = intent.getIntExtra(EXTRA_INDEX, 0).coerceIn(0, maxOf(0, episodes.size - 1))
+        initialIndex = index
+        startPosition = intent.getLongExtra(EXTRA_START_POSITION, 0L)
 
         if (episodes.isEmpty()) {
             finish()
@@ -476,7 +480,11 @@ class PlayerActivity : Activity() {
         player.setPlaybackSpeed(playbackSpeed)
         player.prepare()
 
-        if (resume) {
+        if (startPosition > 0 && newIndex == initialIndex) {
+            // 从历史点进来：按云端记录的位置续播，优先于本机进度。
+            player.seekTo(startPosition)
+            startPosition = 0
+        } else if (resume) {
             val saved = (application as App).library.progressFor(seriesId)
             if (saved != null && saved.index == newIndex && saved.position in 1..(saved.duration - 5000)) {
                 player.seekTo(saved.position)
@@ -860,6 +868,7 @@ class PlayerActivity : Activity() {
         const val EXTRA_COVER = "series_cover"
         const val EXTRA_EPISODES = "episode_ids"
         const val EXTRA_INDEX = "episode_index"
+        const val EXTRA_START_POSITION = "start_position"
         private const val KEY_SPEED = "speed"
         private const val TAG = "HGPlayer"
     }

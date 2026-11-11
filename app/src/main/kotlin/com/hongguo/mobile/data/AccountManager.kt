@@ -8,6 +8,7 @@ import com.hongguotv.core.CloudAccountClient
 import com.hongguotv.core.CloudProfile
 import com.hongguotv.core.Series
 import org.json.JSONArray
+import org.json.JSONObject
 import java.io.IOException
 
 /**
@@ -75,8 +76,36 @@ class AccountManager(context: Context) {
         val session = credentials ?: return cachedFavorites()
         val series = client.favorites(session).map { it.series }
         writeCache(series)
+        cache.edit().putLong(KEY_FAVORITES_AT, System.currentTimeMillis()).apply()
         return series.filterNot { it.id in hiddenCloud }
     }
+
+    fun refreshHistory(): List<HistoryEntry> {
+        val session = credentials ?: return cachedHistory()
+        val rows = client.history(session).map {
+            HistoryEntry(
+                series = it.series,
+                episodeIndex = it.episodeIndex,
+                position = it.position,
+                duration = it.duration,
+                updatedAt = it.updatedAt,
+            )
+        }
+        writeHistory(rows)
+        cache.edit().putLong(KEY_HISTORY_AT, System.currentTimeMillis()).apply()
+        return rows
+    }
+
+    fun cachedHistory(): List<HistoryEntry> = runCatching {
+        val array = JSONArray(cache.getString(KEY_HISTORY, "[]"))
+        (0 until array.length()).mapNotNull { index ->
+            array.optJSONObject(index)?.let { HistoryEntry.fromJson(it) }
+        }
+    }.getOrDefault(emptyList())
+
+    fun favoritesRefreshedAt(): Long = cache.getLong(KEY_FAVORITES_AT, 0L)
+
+    fun historyRefreshedAt(): Long = cache.getLong(KEY_HISTORY_AT, 0L)
 
     fun cachedFavorites(): List<Series> = runCatching {
         val array = JSONArray(cache.getString(KEY_FAVORITES, "[]"))
@@ -114,10 +143,46 @@ class AccountManager(context: Context) {
         cache.edit().putString(KEY_FAVORITES, array.toString()).apply()
     }
 
+    private fun writeHistory(rows: List<HistoryEntry>) {
+        val array = JSONArray()
+        rows.take(MAX_HISTORY).forEach { array.put(it.toJson()) }
+        cache.edit().putString(KEY_HISTORY, array.toString()).apply()
+    }
+
     private companion object {
         const val KEY_NICKNAME = "nickname"
         const val KEY_FAVORITES = "favorites"
+        const val KEY_FAVORITES_AT = "favorites_at"
+        const val KEY_HISTORY = "history"
+        const val KEY_HISTORY_AT = "history_at"
         const val KEY_HIDDEN = "hidden_cloud"
         const val MAX_CACHE = 500
+        const val MAX_HISTORY = 200
+    }
+}
+
+/** 历史条目：云端与本地统一的展示模型。 */
+data class HistoryEntry(
+    val series: Series,
+    val episodeIndex: Int,
+    val position: Long,
+    val duration: Long,
+    val updatedAt: Long,
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("series", series.toJson())
+        .put("episodeIndex", episodeIndex)
+        .put("position", position)
+        .put("duration", duration)
+        .put("updatedAt", updatedAt)
+
+    companion object {
+        fun fromJson(o: JSONObject): HistoryEntry = HistoryEntry(
+            series = Series.fromJson(o.getJSONObject("series")),
+            episodeIndex = o.optInt("episodeIndex"),
+            position = o.optLong("position"),
+            duration = o.optLong("duration"),
+            updatedAt = o.optLong("updatedAt"),
+        )
     }
 }

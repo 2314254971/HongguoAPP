@@ -28,6 +28,8 @@ class DetailActivity : Activity() {
     private lateinit var seriesId: String
     private var seriesTitle = ""
     private var coverUrl = ""
+    private var preferredIndex = -1
+    private var preferredPosition = 0L
     private var detail: Detail? = null
     private var expanded = false
 
@@ -50,6 +52,8 @@ class DetailActivity : Activity() {
         seriesId = intent.getStringExtra(EXTRA_ID).orEmpty()
         seriesTitle = intent.getStringExtra(EXTRA_TITLE).orEmpty()
         coverUrl = intent.getStringExtra(EXTRA_COVER).orEmpty()
+        preferredIndex = intent.getIntExtra(EXTRA_START_INDEX, -1)
+        preferredPosition = intent.getLongExtra(EXTRA_START_POSITION, 0L)
 
         cover = findViewById(R.id.cover)
         titleView = findViewById(R.id.title)
@@ -81,6 +85,12 @@ class DetailActivity : Activity() {
             return
         }
         load()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refreshFavorite()
+        refreshPlayButton()
     }
 
     override fun onDestroy() {
@@ -168,7 +178,8 @@ class DetailActivity : Activity() {
     private fun startIndex(): Int {
         val progress = (application as App).library.progressFor(seriesId)
         val size = detail?.episodes?.size ?: 0
-        val index = progress?.index ?: 0
+        // 从历史点进来时按历史集数续播，否则用本机进度。
+        val index = if (preferredIndex >= 0) preferredIndex else progress?.index ?: 0
         return if (size > 0) index.coerceIn(0, size - 1) else 0
     }
 
@@ -178,6 +189,10 @@ class DetailActivity : Activity() {
             toast("这一部还没有可播放的剧集")
             return
         }
+        // 历史带来的集数与位置只消费一次，之后回落到本机进度。
+        val startPosition = if (index == preferredIndex) preferredPosition else 0L
+        preferredIndex = -1
+        preferredPosition = 0L
         startActivity(
             Intent(this, PlayerActivity::class.java)
                 .putExtra(PlayerActivity.EXTRA_SERIES_ID, seriesId)
@@ -187,7 +202,8 @@ class DetailActivity : Activity() {
                     PlayerActivity.EXTRA_EPISODES,
                     ArrayList(detail.episodes),
                 )
-                .putExtra(PlayerActivity.EXTRA_INDEX, index.coerceIn(0, detail.episodes.size - 1)),
+                .putExtra(PlayerActivity.EXTRA_INDEX, index.coerceIn(0, detail.episodes.size - 1))
+                .putExtra(PlayerActivity.EXTRA_START_POSITION, startPosition),
         )
     }
 
@@ -213,8 +229,9 @@ class DetailActivity : Activity() {
     private fun refreshPlayButton() {
         val current = detail
         val progress = (application as App).library.progressFor(seriesId)
-        playBtn.text = if (current != null && progress != null) {
-            "继续观看 第 ${(progress.index + 1).coerceAtMost(current.episodes.size)} 集"
+        val index = if (preferredIndex >= 0) preferredIndex else progress?.index
+        playBtn.text = if (current != null && index != null) {
+            "继续观看 第 ${(index + 1).coerceAtMost(current.episodes.size)} 集"
         } else {
             getString(R.string.play_now)
         }
@@ -234,6 +251,8 @@ class DetailActivity : Activity() {
         const val EXTRA_ID = "series_id"
         const val EXTRA_TITLE = "series_title"
         const val EXTRA_COVER = "series_cover"
+        const val EXTRA_START_INDEX = "start_index"
+        const val EXTRA_START_POSITION = "start_position"
         private const val COLUMNS = 5
         private const val PREVIEW_COUNT = 30
     }
