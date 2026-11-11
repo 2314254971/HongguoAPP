@@ -11,6 +11,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.TypedValue
 import android.view.GestureDetector
 import android.view.Gravity
@@ -84,10 +85,19 @@ class PlayerActivity : Activity() {
 
     private lateinit var player: ExoPlayer
     private var lastSavedAt = 0L
+    private val playerPrefs by lazy { getSharedPreferences("player_prefs", MODE_PRIVATE) }
 
     /** 已经是"第几集 → 已解开的流"；切集时直接复用，避免再等一次网络解析。 */
     private var prefetched: Pair<Int, OpenedStream>? = null
     private var prefetchingIndex = -1
+
+    /** 预解析窗口：初始 3 秒，按实测解析耗时的 EMA 自动调整。 */
+    private val prefetchPolicy = PrefetchPolicy()
+    private val prefetchAttempts = mutableMapOf<Int, Int>()
+    private var prefetchCooldownUntil = 0L
+
+    private var playbackSpeed = 1f
+    private lateinit var speedButton: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -104,6 +114,7 @@ class PlayerActivity : Activity() {
             return
         }
 
+        playbackSpeed = playerPrefs.getFloat(KEY_SPEED, 1f).coerceIn(0.5f, 2f)
         buildViews()
         initPlayer()
         play(index, resume = true)
@@ -197,6 +208,8 @@ class PlayerActivity : Activity() {
                     val duration = if (::player.isInitialized) player.duration else 0
                     if (duration > 0) player.seekTo(duration * (sb?.progress ?: 0) / 1000)
                     hideControlsLater()
+                    // 拖到片尾附近要立刻预解析，不能等下一轮 500ms 心跳。
+                    handler.postDelayed({ maybePrefetch() }, 250)
                 }
             },
         )
@@ -217,7 +230,18 @@ class PlayerActivity : Activity() {
         controls.addView(playButton, LinearLayout.LayoutParams(dp(48), dp(48)))
         controls.addView(next, LinearLayout.LayoutParams(dp(44), dp(44)))
         controls.addView(spacer, LinearLayout.LayoutParams(0, dp(1), 1f))
-        controls.addView(timeView, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+        speedButton = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            text = formatSpeed(playbackSpeed)
+            setOnClickListener { showSpeedPicker() }
+        }
+        controls.addView(speedButton, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+        controls.addView(
+            timeView,
+            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = dp(10) },
+        )
 
         bottomBar.addView(seekBar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         bottomBar.addView(controls, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
@@ -328,6 +352,7 @@ class PlayerActivity : Activity() {
 
     private fun initPlayer() {
         player = ExoPlayer.Builder(this).build()
+        player.setPlaybackSpeed(playbackSpeed)
         playerView.player = player
         player.addListener(
             object : Player.Listener {
@@ -369,6 +394,7 @@ class PlayerActivity : Activity() {
         if (newIndex !in episodes.indices) return
         index = newIndex
         val tone = ++requestId
+        prefetchAttempts.clear()
         updateHeader()
         errorView.visibility = View.GONE
 
@@ -391,16 +417,22 @@ class PlayerActivity : Activity() {
         loadingBox.visibility = View.VISIBLE
         centerPlay.visibility = View.GONE
         val episodeId = episodes[newIndex]
+        val startedAt = SystemClock.elapsedRealtime()
         io.execute {
             val result = runCatching {
                 PlaybackResolver.open(application as App, episodeId)
             }
+            val elapsed = SystemClock.elapsedRealtime() - startedAt
             runOnUiThread {
                 if (tone != requestId) {
                     result.getOrNull()?.close()
                     return@runOnUiThread
                 }
-                result.onSuccess { attach(it, newIndex, resume) }
+                result.onSuccess {
+                    // 阻塞切换的耗时同样是有价值的样本，别只让预解析自己学习。
+                    prefetchPolicy.recordResolve(elapsed)
+                    attach(it, newIndex, resume)
+                }
                     .onFailure {
                         loadingBox.visibility = View.GONE
                         showError(it.message ?: "播放失败，点此重试")
@@ -420,6 +452,7 @@ class PlayerActivity : Activity() {
         val source = ProgressiveMediaSource.Factory(VideoDataSourceFactory(stream.video))
             .createMediaSource(MediaItem.fromUri(Uri.parse("hongguo://episode/$newIndex")))
         player.setMediaSource(source)
+        player.setPlaybackSpeed(playbackSpeed)
         player.prepare()
 
         if (resume) {
@@ -464,12 +497,28 @@ class PlayerActivity : Activity() {
             seekBar.progress = ((position * 1000) / duration).toInt().coerceIn(0, 1000)
         }
         timeView.text = "${formatTime(position)} / ${formatTime(duration)}"
-        if (duration > 0 && position > 0 && player.isPlaying) {
-            saveProgress(false)
-            // 播过 5 秒就把下一集解析好；临近片尾仍未解析则持续重试到成功。
-            val remaining = duration - position
-            if (position > 5000 || remaining in 1..8000) prefetchNext()
-        }
+        if (duration > 0 && position > 0 && player.isPlaying) saveProgress(false)
+        // 暂停时也判定：拖到片尾后即使没继续播，下一集也应该先解析好。
+        maybePrefetch()
+    }
+
+    /**
+     * 是否该开始预解析下一集。剩余时长按倍速换算成媒体时间，
+     * 所以 2 倍速时窗口会自动翻倍；拖动进度后由 onStopTrackingTouch 立即触发一次。
+     */
+    private fun maybePrefetch() {
+        val next = index + 1
+        if (next >= episodes.size) return
+        if (prefetched?.first == next || prefetchingIndex == next) return
+        if (!::player.isInitialized) return
+        val duration = player.duration
+        if (duration <= 0 || duration == C.TIME_UNSET) return
+        val remaining = duration - player.currentPosition
+        val coolingDown = SystemClock.elapsedRealtime() < prefetchCooldownUntil
+        val attempts = prefetchAttempts[next] ?: 0
+        if (!prefetchPolicy.shouldPrefetch(remaining, playbackSpeed, coolingDown, attempts)) return
+        prefetchAttempts[next] = attempts + 1
+        prefetchNext()
     }
 
     private fun formatTime(ms: Long): String {
@@ -610,6 +659,7 @@ class PlayerActivity : Activity() {
         if (prefetched?.first == next || prefetchingIndex == next) return
         prefetchingIndex = next
         val tone = requestId
+        val startedAt = SystemClock.elapsedRealtime()
         io.execute {
             val result = runCatching {
                 PlaybackResolver.open(application as App, episodes[next]).also { stream ->
@@ -617,18 +667,54 @@ class PlayerActivity : Activity() {
                     runCatching { stream.video.warm(512 * 1024) }
                 }
             }
+            val elapsed = SystemClock.elapsedRealtime() - startedAt
             runOnUiThread {
                 if (prefetchingIndex == next) prefetchingIndex = -1
                 result.onSuccess { stream ->
+                    // 预热也算进耗时，窗口按"实际从发起到可用"来估。
+                    prefetchPolicy.recordResolve(elapsed)
                     if (tone == requestId && index + 1 == next) {
                         prefetched?.second?.close()
                         prefetched = next to stream
                     } else {
                         stream.close()
                     }
+                }.onFailure {
+                    // 失败不要每 500ms 撞一次接口，冷却 2.5 秒再试。
+                    prefetchCooldownUntil = SystemClock.elapsedRealtime() + 2_500
                 }
             }
         }
+    }
+
+    private fun showSpeedPicker() {
+        val options = floatArrayOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
+        val labels = options.map { formatSpeed(it) }.toTypedArray()
+        val checked = options.indexOfFirst { kotlin.math.abs(it - playbackSpeed) < 0.01f }
+        AlertDialog.Builder(this)
+            .setTitle("播放倍速")
+            .setSingleChoiceItems(labels, checked) { dialog, which ->
+                setSpeed(options[which])
+                dialog.dismiss()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun setSpeed(value: Float) {
+        playbackSpeed = value.coerceIn(0.5f, 2f)
+        if (::player.isInitialized) player.setPlaybackSpeed(playbackSpeed)
+        playerPrefs.edit().putFloat(KEY_SPEED, playbackSpeed).apply()
+        if (::speedButton.isInitialized) speedButton.text = formatSpeed(playbackSpeed)
+        // 倍速变了，媒体时间窗口也跟着变，立刻重新判定一次。
+        maybePrefetch()
+    }
+
+    private fun formatSpeed(value: Float): String {
+        val text =
+            if (value == value.toInt().toFloat()) value.toInt().toString()
+            else String.format("%.2f", value).trimEnd('0').trimEnd('.')
+        return "${text}x"
     }
 
     private fun toggleOrientation() {
@@ -724,5 +810,6 @@ class PlayerActivity : Activity() {
         const val EXTRA_COVER = "series_cover"
         const val EXTRA_EPISODES = "episode_ids"
         const val EXTRA_INDEX = "episode_index"
+        private const val KEY_SPEED = "speed"
     }
 }
