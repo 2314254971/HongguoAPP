@@ -2,6 +2,7 @@
 package com.hongguo.mobile
 
 import android.app.Application
+import com.hongguo.mobile.data.AccountManager
 import com.hongguo.mobile.data.ImageLoader
 import com.hongguo.mobile.data.LocalLibrary
 import com.hongguotv.core.ContentRepository
@@ -16,6 +17,9 @@ class App : Application() {
     lateinit var library: LocalLibrary
         private set
 
+    lateinit var account: AccountManager
+        private set
+
     val http: OkHttpClient
         get() = repo.http
 
@@ -23,6 +27,7 @@ class App : Application() {
         super.onCreate()
         repo = ContentRepository()
         library = LocalLibrary(this)
+        account = AccountManager(this)
         ImageLoader.init(this)
     }
 }

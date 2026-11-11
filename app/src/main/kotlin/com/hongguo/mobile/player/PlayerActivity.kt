@@ -540,6 +540,11 @@ class PlayerActivity : Activity() {
         val coolingDown = SystemClock.elapsedRealtime() < prefetchCooldownUntil
         val attempts = prefetchAttempts[next] ?: 0
         if (!prefetchPolicy.shouldPrefetch(remaining, playbackSpeed, coolingDown, attempts)) return
+        Log.d(
+            TAG,
+            "prefetch trigger ep=${next + 1} remaining=$remaining " +
+                "threshold=${prefetchPolicy.thresholdMs} speed=$playbackSpeed",
+        )
         prefetchAttempts[next] = attempts + 1
         prefetchNext()
     }

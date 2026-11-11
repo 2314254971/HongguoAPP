@@ -61,6 +61,9 @@ class HomeActivity : Activity() {
         findViewById<View>(R.id.favBtn).setOnClickListener {
             startActivity(Intent(this, FavoritesActivity::class.java))
         }
+        findViewById<View>(R.id.accountBtn).setOnClickListener {
+            startActivity(Intent(this, AccountActivity::class.java))
+        }
         findViewById<View>(R.id.retryBtn).setOnClickListener {
             errorBox.hide()
             loadNextPage()

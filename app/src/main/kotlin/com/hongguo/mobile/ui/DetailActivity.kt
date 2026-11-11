@@ -193,7 +193,10 @@ class DetailActivity : Activity() {
 
     private fun toggleFavorite() {
         val series = detail?.series ?: seriesPlaceholder()
-        val added = (application as App).library.toggleFavorite(series)
+        val app = application as App
+        val added = app.library.toggleFavorite(series)
+        // 云端收藏会在刷新时回来，本机取消要记一笔，避免又冒出来。
+        if (added) app.account.unhideCloudFavorite(seriesId) else app.account.hideCloudFavorite(seriesId)
         toast(if (added) "已加入收藏" else "已取消收藏")
         refreshFavorite()
     }
