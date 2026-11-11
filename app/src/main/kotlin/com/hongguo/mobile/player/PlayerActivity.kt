@@ -424,6 +424,10 @@ class PlayerActivity : Activity() {
             }
             val elapsed = SystemClock.elapsedRealtime() - startedAt
             runOnUiThread {
+                if (isFinishing || isDestroyed) {
+                    result.getOrNull()?.close()
+                    return@runOnUiThread
+                }
                 if (tone != requestId) {
                     result.getOrNull()?.close()
                     return@runOnUiThread
@@ -669,6 +673,10 @@ class PlayerActivity : Activity() {
             }
             val elapsed = SystemClock.elapsedRealtime() - startedAt
             runOnUiThread {
+                if (isFinishing || isDestroyed) {
+                    result.getOrNull()?.close()
+                    return@runOnUiThread
+                }
                 if (prefetchingIndex == next) prefetchingIndex = -1
                 result.onSuccess { stream ->
                     // 预热也算进耗时，窗口按"实际从发起到可用"来估。
