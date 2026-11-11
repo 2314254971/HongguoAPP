@@ -1,0 +1,4 @@
+-dontwarn org.bouncycastle.**
+-dontwarn org.jsoup.**
+-keep class org.json.** { *; }
+-keep class com.hongguotv.core.** { *; }

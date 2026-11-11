@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">红果短剧</string>
+    <string name="home_tab_recommend">推荐</string>
+    <string name="search_hint">搜索剧名、演员</string>
+    <string name="loading">加载中…</string>
+    <string name="retry">重试</string>
+    <string name="load_failed">加载失败，请检查网络</string>
+    <string name="episodes">选集</string>
+    <string name="expand_all">展开全部</string>
+    <string name="collapse">收起</string>
+    <string name="play_now">立即播放</string>
+    <string name="continue_watch">继续观看</string>
+    <string name="favorite">收藏</string>
+    <string name="favorited">已收藏</string>
+    <string name="no_result">没有找到相关短剧</string>
+    <string name="network_error">网络异常，请稍后再试</string>
+    <string name="player_rotate">切换横竖屏</string>
+    <string name="player_episodes">选集</string>
+</resources>
