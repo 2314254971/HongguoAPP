@@ -612,7 +612,10 @@ class PlayerActivity : Activity() {
         val tone = requestId
         io.execute {
             val result = runCatching {
-                PlaybackResolver.open(application as App, episodes[next])
+                PlaybackResolver.open(application as App, episodes[next]).also { stream ->
+                    // 预读首个 512 KiB，切过去时 Media3 解析容器不再等网络。
+                    runCatching { stream.video.warm(512 * 1024) }
+                }
             }
             runOnUiThread {
                 if (prefetchingIndex == next) prefetchingIndex = -1
