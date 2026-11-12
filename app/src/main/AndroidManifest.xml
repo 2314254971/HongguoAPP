@@ -43,12 +43,6 @@
             android:screenOrientation="portrait" />
 
         <activity
-            android:name=".ui.CommentsActivity"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode"
-            android:exported="false"
-            android:screenOrientation="portrait" />
-
-        <activity
             android:name=".ui.SearchActivity"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode"
             android:exported="false"

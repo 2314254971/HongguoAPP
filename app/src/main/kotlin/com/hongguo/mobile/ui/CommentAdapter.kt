@@ -7,17 +7,10 @@ import android.view.ViewGroup
 import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 import com.hongguo.mobile.R
+import com.hongguo.mobile.data.CommentItem
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-
-data class CommentItem(
-    val id: String,
-    val author: String,
-    val content: String,
-    val created: Long,
-    val likes: Long,
-)
 
 class CommentAdapter : RecyclerView.Adapter<CommentAdapter.Holder>() {
 

@@ -42,7 +42,6 @@ class DetailActivity : Activity() {
     private lateinit var toggleAll: TextView
     private lateinit var favBtn: TextView
     private lateinit var playBtn: TextView
-    private lateinit var commentsHint: TextView
     private lateinit var loading: View
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -65,7 +64,6 @@ class DetailActivity : Activity() {
         toggleAll = findViewById(R.id.toggleAll)
         favBtn = findViewById(R.id.favBtn)
         playBtn = findViewById(R.id.playBtn)
-        commentsHint = findViewById(R.id.commentsHint)
         loading = findViewById(R.id.loading)
 
         applySystemBarPadding(findViewById(R.id.root))
@@ -81,7 +79,6 @@ class DetailActivity : Activity() {
         }
         favBtn.setOnClickListener { toggleFavorite() }
         playBtn.setOnClickListener { playAt(startIndex()) }
-        findViewById<View>(R.id.commentsEntry).setOnClickListener { openComments() }
 
         if (seriesId.isBlank()) {
             finish()
@@ -158,7 +155,6 @@ class DetailActivity : Activity() {
             index += COLUMNS
         }
 
-        commentsHint.text = "第 ${startIndex() + 1} 集"
         toggleAll.visibility = if (episodes.size > PREVIEW_COUNT) View.VISIBLE else View.GONE
         toggleAll.setText(if (expanded) R.string.collapse else R.string.expand_all)
         refreshPlayButton()
@@ -208,18 +204,6 @@ class DetailActivity : Activity() {
                 )
                 .putExtra(PlayerActivity.EXTRA_INDEX, index.coerceIn(0, detail.episodes.size - 1))
                 .putExtra(PlayerActivity.EXTRA_START_POSITION, startPosition),
-        )
-    }
-
-    private fun openComments() {
-        val current = detail ?: return
-        val index = startIndex()
-        val episode = current.episodes.getOrNull(index) ?: return
-        startActivity(
-            Intent(this, CommentsActivity::class.java)
-                .putExtra(CommentsActivity.EXTRA_SERIES, seriesId)
-                .putExtra(CommentsActivity.EXTRA_EPISODE, episode)
-                .putExtra(CommentsActivity.EXTRA_LABEL, "第 ${index + 1} 集"),
         )
     }
 

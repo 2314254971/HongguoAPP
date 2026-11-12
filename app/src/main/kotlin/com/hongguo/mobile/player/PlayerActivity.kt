@@ -41,9 +41,14 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import com.hongguo.mobile.App
 import com.hongguo.mobile.R
+import com.hongguo.mobile.data.CommentPager
+import com.hongguo.mobile.data.CommentPages
 import com.hongguo.mobile.data.LocalLibrary
+import com.hongguo.mobile.ui.CommentAdapter
 import com.hongguo.mobile.ui.dp
 import com.hongguotv.core.TimedComments
 import java.util.concurrent.Executors
@@ -113,7 +118,19 @@ class PlayerActivity : Activity() {
     private lateinit var videoBox: FrameLayout
     private lateinit var danmakuView: DanmakuView
     private lateinit var danmakuButton: TextView
+    private lateinit var commentsButton: TextView
     private lateinit var speedButton: TextView
+
+    private lateinit var commentPanel: FrameLayout
+    private lateinit var commentSheet: LinearLayout
+    private lateinit var commentList: RecyclerView
+    private lateinit var commentLoading: View
+    private lateinit var commentEmpty: TextView
+    private lateinit var commentTitle: TextView
+    private val commentAdapter = CommentAdapter()
+    private var commentPager: CommentPager? = null
+    private var commentEpisode = ""
+    private var commentLoadingPage = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -253,6 +270,14 @@ class PlayerActivity : Activity() {
         controls.addView(playButton, LinearLayout.LayoutParams(dp(48), dp(48)))
         controls.addView(next, LinearLayout.LayoutParams(dp(44), dp(44)))
         controls.addView(spacer, LinearLayout.LayoutParams(0, dp(1), 1f))
+        commentsButton = TextView(this).apply {
+            text = "评"
+            textSize = 13f
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            setTextColor(Color.WHITE)
+            setOnClickListener { showComments() }
+        }
+        controls.addView(commentsButton, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         danmakuButton = TextView(this).apply {
             text = "弹"
             textSize = 13f
@@ -323,6 +348,8 @@ class PlayerActivity : Activity() {
         hint.animate().alpha(0f).setStartDelay(3500).setDuration(600)
             .withEndAction { hint.visibility = View.GONE }
             .start()
+
+        buildCommentSheet()
 
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             val bars = insets.getInsets(
@@ -429,6 +456,11 @@ class PlayerActivity : Activity() {
         prefetchAttempts.clear()
         danmakuEpisode = ""
         danmakuView.clear()
+        hideComments()
+        commentEpisode = ""
+        commentPager = null
+        commentLoadingPage = false
+        commentAdapter.clear()
         updateHeader()
         errorView.visibility = View.GONE
 
@@ -833,6 +865,145 @@ class PlayerActivity : Activity() {
         return output
     }
 
+    private fun buildCommentSheet() {
+        commentPanel = FrameLayout(this).apply { visibility = View.GONE }
+        root.addView(commentPanel, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+
+        commentPanel.addView(
+            View(this).apply {
+                setBackgroundColor(Color.parseColor("#99000000"))
+                setOnClickListener { hideComments() }
+            },
+            FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT),
+        )
+
+        commentSheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                cornerRadii = floatArrayOf(
+                    dp(16).toFloat(), dp(16).toFloat(),
+                    dp(16).toFloat(), dp(16).toFloat(),
+                    0f, 0f, 0f, 0f,
+                )
+                setColor(getColor(R.color.surface))
+            }
+        }
+        commentPanel.addView(
+            commentSheet,
+            FrameLayout.LayoutParams(MATCH_PARENT, sheetHeight(), Gravity.BOTTOM),
+        )
+
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(10), dp(6), dp(6))
+        }
+        commentTitle = TextView(this).apply {
+            setTextColor(getColor(R.color.text))
+            textSize = 15f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            text = "评论"
+        }
+        val close = TextView(this).apply {
+            text = "×"
+            textSize = 22f
+            gravity = Gravity.CENTER
+            setTextColor(getColor(R.color.text_muted))
+            contentDescription = "关闭评论"
+            setOnClickListener { hideComments() }
+        }
+        header.addView(commentTitle, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+        header.addView(View(this), LinearLayout.LayoutParams(0, dp(1), 1f))
+        header.addView(close, LinearLayout.LayoutParams(dp(44), dp(44)))
+        commentSheet.addView(header, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        commentList = RecyclerView(this).apply {
+            layoutManager = LinearLayoutManager(this@PlayerActivity)
+            adapter = commentAdapter
+            clipToPadding = false
+            setPadding(0, 0, 0, dp(12))
+            addOnScrollListener(
+                object : RecyclerView.OnScrollListener() {
+                    override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                        if (dy <= 0) return
+                        val last = (recyclerView.layoutManager as? LinearLayoutManager)
+                            ?.findLastVisibleItemPosition() ?: return
+                        if (last >= commentAdapter.itemCount - 3) loadComments()
+                    }
+                },
+            )
+        }
+        val listBox = FrameLayout(this)
+        listBox.addView(commentList, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        commentLoading = ProgressBar(this).apply { visibility = View.GONE }
+        listBox.addView(
+            commentLoading,
+            FrameLayout.LayoutParams(dp(28), dp(28), Gravity.CENTER),
+        )
+        commentEmpty = TextView(this).apply {
+            gravity = Gravity.CENTER
+            setTextColor(getColor(R.color.text_muted))
+            textSize = 13f
+            text = "这一集还没有评论"
+            visibility = View.GONE
+        }
+        listBox.addView(commentEmpty, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        commentSheet.addView(listBox, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+    }
+
+    private fun sheetHeight(): Int = (resources.displayMetrics.heightPixels * 0.62f).toInt()
+
+    private fun showComments() {
+        val episodeId = episodes.getOrNull(index) ?: return
+        commentTitle.text = "评论 · 第 ${index + 1} 集"
+        commentSheet.layoutParams =
+            (commentSheet.layoutParams as FrameLayout.LayoutParams).apply { height = sheetHeight() }
+        commentPanel.visibility = View.VISIBLE
+        commentPanel.bringToFront()
+        if (commentEpisode == episodeId) return
+        commentEpisode = episodeId
+        commentAdapter.clear()
+        commentEmpty.visibility = View.GONE
+        commentPager = CommentPager { cursor -> CommentPages.load(seriesId, episodeId, cursor) }
+        loadComments()
+    }
+
+    private fun hideComments() {
+        if (::commentPanel.isInitialized) commentPanel.visibility = View.GONE
+    }
+
+    private fun loadComments() {
+        if (commentLoadingPage) return
+        val pager = commentPager ?: return
+        if (!pager.hasMore) return
+        commentLoadingPage = true
+        if (commentAdapter.itemCount == 0) commentLoading.visibility = View.VISIBLE
+        io.execute {
+            val result = runCatching { pager.next() }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                commentLoadingPage = false
+                commentLoading.visibility = View.GONE
+                result.onSuccess { rows ->
+                    commentAdapter.addAll(rows)
+                    if (commentAdapter.itemCount == 0) {
+                        commentEmpty.text = if (pager.hasMore) "评论加载失败" else "这一集还没有评论"
+                        commentEmpty.visibility = View.VISIBLE
+                    } else {
+                        commentEmpty.visibility = View.GONE
+                    }
+                }.onFailure {
+                    if (commentAdapter.itemCount == 0) {
+                        commentEmpty.text = "评论加载失败：${it.message ?: "请稍后重试"}"
+                        commentEmpty.visibility = View.VISIBLE
+                    } else {
+                        toast("评论加载失败")
+                    }
+                }
+            }
+        }
+    }
+
     private fun showSpeedPicker() {
         val options = floatArrayOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
         val labels = options.map { formatSpeed(it) }.toTypedArray()
@@ -941,6 +1112,10 @@ class PlayerActivity : Activity() {
     }
 
     private fun handleBack() {
+        if (::commentPanel.isInitialized && commentPanel.visibility == View.VISIBLE) {
+            hideComments()
+            return
+        }
         if (landscape) {
             toggleOrientation()
         } else {
