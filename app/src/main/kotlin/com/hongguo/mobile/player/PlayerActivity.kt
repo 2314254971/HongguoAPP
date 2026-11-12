@@ -45,6 +45,7 @@ import com.hongguo.mobile.App
 import com.hongguo.mobile.R
 import com.hongguo.mobile.data.LocalLibrary
 import com.hongguo.mobile.ui.dp
+import com.hongguotv.core.TimedComments
 import java.util.concurrent.Executors
 import kotlin.math.abs
 
@@ -103,6 +104,15 @@ class PlayerActivity : Activity() {
     private var playbackSpeed = 1f
     private var initialIndex = 0
     private var startPosition = 0L
+
+    private val app get() = application as App
+    private val timedComments by lazy { TimedComments(app.http) }
+    private var danmakuEnabled = true
+    private var danmakuEpisode = ""
+    private var danmakuTone = 0
+    private lateinit var videoBox: FrameLayout
+    private lateinit var danmakuView: DanmakuView
+    private lateinit var danmakuButton: TextView
     private lateinit var speedButton: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -123,6 +133,7 @@ class PlayerActivity : Activity() {
         }
 
         playbackSpeed = playerPrefs.getFloat(KEY_SPEED, 1f).coerceIn(0.5f, 2f)
+        danmakuEnabled = playerPrefs.getBoolean(KEY_DANMAKU, true)
         buildViews()
         initPlayer()
         play(index, resume = true)
@@ -134,15 +145,19 @@ class PlayerActivity : Activity() {
         root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         setContentView(root)
 
+        videoBox = FrameLayout(this)
+        root.addView(
+            videoBox,
+            FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.CENTER),
+        )
         playerView = PlayerView(this).apply {
             useController = false
             resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
             setShutterBackgroundColor(Color.BLACK)
         }
-        root.addView(
-            playerView,
-            FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.CENTER),
-        )
+        videoBox.addView(playerView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        danmakuView = DanmakuView(this).apply { danmakuOn = danmakuEnabled }
+        videoBox.addView(danmakuView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
 
         val overlay = FrameLayout(this)
         root.addView(overlay, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
@@ -238,6 +253,14 @@ class PlayerActivity : Activity() {
         controls.addView(playButton, LinearLayout.LayoutParams(dp(48), dp(48)))
         controls.addView(next, LinearLayout.LayoutParams(dp(44), dp(44)))
         controls.addView(spacer, LinearLayout.LayoutParams(0, dp(1), 1f))
+        danmakuButton = TextView(this).apply {
+            text = "弹"
+            textSize = 13f
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            setTextColor(if (danmakuEnabled) getColor(R.color.accent) else Color.WHITE)
+            setOnClickListener { toggleDanmaku() }
+        }
+        controls.addView(danmakuButton, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         speedButton = TextView(this).apply {
             setTextColor(Color.WHITE)
             textSize = 13f
@@ -378,6 +401,7 @@ class PlayerActivity : Activity() {
                         Player.STATE_READY -> {
                             loadingBox.visibility = View.GONE
                             errorView.visibility = View.GONE
+                            maybeLoadDanmaku()
                         }
                     }
                 }
@@ -403,6 +427,8 @@ class PlayerActivity : Activity() {
         index = newIndex
         val tone = ++requestId
         prefetchAttempts.clear()
+        danmakuEpisode = ""
+        danmakuView.clear()
         updateHeader()
         errorView.visibility = View.GONE
 
@@ -526,6 +552,7 @@ class PlayerActivity : Activity() {
             seekBar.progress = ((position * 1000) / duration).toInt().coerceIn(0, 1000)
         }
         timeView.text = "${formatTime(position)} / ${formatTime(duration)}"
+        danmakuView.update(position, player.isPlaying)
         if (duration > 0 && position > 0 && player.isPlaying) saveProgress(false)
         // 暂停时也判定：拖到片尾后即使没继续播，下一集也应该先解析好。
         maybePrefetch()
@@ -745,6 +772,67 @@ class PlayerActivity : Activity() {
         }
     }
 
+    private fun toggleDanmaku() {
+        danmakuEnabled = !danmakuEnabled
+        danmakuView.danmakuOn = danmakuEnabled
+        danmakuButton.setTextColor(if (danmakuEnabled) getColor(R.color.accent) else Color.WHITE)
+        playerPrefs.edit().putBoolean(KEY_DANMAKU, danmakuEnabled).apply()
+        if (danmakuEnabled) {
+            maybeLoadDanmaku()
+        } else {
+            danmakuEpisode = ""
+            danmakuView.clear()
+        }
+    }
+
+    private fun maybeLoadDanmaku() {
+        if (!danmakuEnabled || !::player.isInitialized) return
+        val episodeId = episodes.getOrNull(index) ?: return
+        val duration = player.duration
+        if (duration <= 0 || duration == C.TIME_UNSET) return
+        if (danmakuEpisode == episodeId) return
+        danmakuEpisode = episodeId
+        danmakuView.clear()
+        val tone = ++danmakuTone
+        io.execute {
+            val rows = runCatching { fetchDanmaku(episodeId, duration) }.getOrDefault(emptyList())
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (tone == danmakuTone && episodes.getOrNull(index) == episodeId) {
+                    danmakuView.setItems(rows)
+                }
+            }
+        }
+    }
+
+    /** 时间轴弹幕按区间分页，最多取 3 页，够覆盖一集短剧。 */
+    private fun fetchDanmaku(episodeId: String, duration: Long): List<DanmakuItem> {
+        val output = mutableListOf<DanmakuItem>()
+        val total = duration.coerceIn(30_000L, 86_400_000L)
+        var start = 0L
+        var cursor = ""
+        repeat(3) {
+            val page = timedComments.read(seriesId, episodeId, start, total, cursor)
+            val rows = page.optJSONArray("items") ?: return output
+            for (i in 0 until rows.length()) {
+                val row = rows.optJSONObject(i) ?: continue
+                val text = row.optString("text").trim()
+                if (text.isEmpty()) continue
+                output += DanmakuItem(
+                    id = row.optString("id"),
+                    text = text,
+                    timeMs = row.optLong("timeMS"),
+                )
+            }
+            if (!page.optBoolean("hasMore")) return output
+            val next = page.optLong("nextMS")
+            if (next <= start || next >= total) return output
+            start = next
+            cursor = page.optString("nextCursor")
+        }
+        return output
+    }
+
     private fun showSpeedPicker() {
         val options = floatArrayOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
         val labels = options.map { formatSpeed(it) }.toTypedArray()
@@ -794,9 +882,9 @@ class PlayerActivity : Activity() {
     }
 
     private fun layoutVideo() {
-        if (!::playerView.isInitialized) return
+        if (!::videoBox.isInitialized) return
         val metrics = resources.displayMetrics
-        val params = playerView.layoutParams as FrameLayout.LayoutParams
+        val params = videoBox.layoutParams as FrameLayout.LayoutParams
         if (landscape) {
             params.width = MATCH_PARENT
             params.height = MATCH_PARENT
@@ -812,7 +900,7 @@ class PlayerActivity : Activity() {
             params.height = height.toInt()
         }
         params.gravity = Gravity.CENTER
-        playerView.layoutParams = params
+        videoBox.layoutParams = params
     }
 
     // ---------------- 生命周期 ----------------
@@ -870,6 +958,7 @@ class PlayerActivity : Activity() {
         const val EXTRA_INDEX = "episode_index"
         const val EXTRA_START_POSITION = "start_position"
         private const val KEY_SPEED = "speed"
+        private const val KEY_DANMAKU = "danmaku"
         private const val TAG = "HGPlayer"
     }
 }
