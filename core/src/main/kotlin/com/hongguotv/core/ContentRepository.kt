@@ -848,7 +848,18 @@ constructor(
     }
 
     /** Preserve main's registered player path when the newer model service is unavailable. */
-    fun streamLadderWithCompatibility(id: String, metadataAhead: List<String> = emptyList(), speculative: Boolean = false): StreamLadder {
+    fun streamLadderWithCompatibility(id: String, metadataAhead: List<String> = emptyList(), speculative: Boolean = false): StreamLadder =
+        RequestScope.withDeadline(System.nanoTime() + TimeUnit.SECONDS.toNanos(if (speculative) 2 else 8)) {
+            val profile = if (speculative) {
+                playbackSession.existing() ?: throw IOException("播放设备尚未就绪")
+            } else {
+                playbackSession.profile(http)
+            }
+            MobilePlayback.ladder(id, profile.values, http, MobilePlayback.signer, clock())
+        }
+
+    /** 旧签名链路，保留给回归测试与兼容回退。 */
+    internal fun legacyStreamLadderWithCompatibility(id: String, metadataAhead: List<String> = emptyList(), speculative: Boolean = false): StreamLadder {
         try {
             return streamLadder(id, metadataAhead, speculative)
         } catch (error: IOException) {

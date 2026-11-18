@@ -64,6 +64,13 @@ hongguo-mobile/
 └── settings.gradle.kts
 ```
 
+## 播放解析
+
+播放走官方移动端的单集播放接口（`/novel/player/multi_video_model/player/v1`），请求使用 v5 签名。
+2026-11-16 上游把该签名从 Java/Android 依赖改为纯 Kotlin 实现，解析失败时不再返回无法解析的空正文，
+本仓库 1.4.1 已同步：`Signer`/`AesV3`/`PlayerSignature`/`MobilePlayback`/`V5Constants`。
+旧签名链路保留为 `legacyStreamLadderWithCompatibility`，仅供回归测试。
+
 ## 自动构建与发布
 
 `.github/workflows/android.yml`：push / PR 跑单元测试并构建 APK 作为 artifact；
@@ -86,6 +93,15 @@ hongguo-mobile/
 ```sh
 ./gradlew :app:assembleRelease   # 未配置签名时产物不可安装
 ```
+
+## 日志
+
+播放解析失败时先看日志：
+
+- 手机路径：`Android/data/com.hongguo.mobile/files/logs/app.log`（超过 512 KB 轮换为 `app.log.1`）；
+- 「我的」页右上角「日志」按钮，可直接用系统分享把文件发出去；
+- 或用 adb：`adb pull /sdcard/Android/data/com.hongguo.mobile/files/logs/app.log`；
+- 日志只写本机，不含账号凭证，也不上传。
 
 ## 已知限制
 

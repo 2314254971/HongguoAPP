@@ -15,6 +15,7 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.hongguo.mobile.App
+import com.hongguo.mobile.data.AppLog
 import com.hongguo.mobile.R
 import com.hongguo.mobile.data.HistoryEntry
 import com.hongguotv.core.Series
@@ -98,6 +99,9 @@ class AccountActivity : Activity() {
         loginBtn.setOnClickListener { startActivity(Intent(this, LoginActivity::class.java)) }
         refreshBtn.setOnClickListener { refresh(tab) }
         logoutBtn.setOnClickListener { confirmLogout() }
+        findViewById<View>(R.id.logBtn).setOnClickListener {
+            if (!AppLog.share(this)) toast("还没有日志，先播放一集再试")
+        }
     }
 
     override fun onResume() {

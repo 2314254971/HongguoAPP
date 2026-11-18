@@ -12,7 +12,6 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import android.util.Log
 import android.util.TypedValue
 import android.view.GestureDetector
 import android.view.Gravity
@@ -45,6 +44,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.hongguo.mobile.App
 import com.hongguo.mobile.R
+import com.hongguo.mobile.data.AppLog
 import com.hongguo.mobile.data.CommentPager
 import com.hongguo.mobile.data.CommentPages
 import com.hongguo.mobile.data.LocalLibrary
@@ -477,7 +477,7 @@ class PlayerActivity : Activity() {
         if (ready != null) {
             prefetched = null
             loadingBox.visibility = View.GONE
-            Log.d(TAG, "prefetch hit ep=${newIndex + 1}")
+            AppLog.d(TAG, "prefetch hit ep=${newIndex + 1}")
             attach(ready, newIndex, resume)
             // 不再立刻解析再下一集：交给时间窗口判定，避免"刚开播就多发一次请求"。
             return
@@ -488,14 +488,14 @@ class PlayerActivity : Activity() {
             pendingIndex = newIndex
             loadingBox.visibility = View.VISIBLE
             centerPlay.visibility = View.GONE
-            Log.d(TAG, "wait prefetch ep=${newIndex + 1}")
+            AppLog.d(TAG, "wait prefetch ep=${newIndex + 1}")
             return
         }
 
         loadingBox.visibility = View.VISIBLE
         centerPlay.visibility = View.GONE
         val episodeId = episodes[newIndex]
-        Log.d(TAG, "resolve blocking ep=${newIndex + 1} id=$episodeId")
+        AppLog.d(TAG, "resolve blocking ep=${newIndex + 1} id=$episodeId")
         val startedAt = SystemClock.elapsedRealtime()
         io.execute {
             val result = runCatching {
@@ -607,7 +607,7 @@ class PlayerActivity : Activity() {
         val coolingDown = SystemClock.elapsedRealtime() < prefetchCooldownUntil
         val attempts = prefetchAttempts[next] ?: 0
         if (!prefetchPolicy.shouldPrefetch(remaining, playbackSpeed, coolingDown, attempts)) return
-        Log.d(
+        AppLog.d(
             TAG,
             "prefetch trigger ep=${next + 1} remaining=$remaining " +
                 "threshold=${prefetchPolicy.thresholdMs} speed=$playbackSpeed",
@@ -754,7 +754,7 @@ class PlayerActivity : Activity() {
         if (prefetched?.first == next || prefetchingIndex == next) return
         prefetchingIndex = next
         val startedAt = SystemClock.elapsedRealtime()
-        Log.d(TAG, "resolve prefetch ep=${next + 1}")
+        AppLog.d(TAG, "resolve prefetch ep=${next + 1}")
         io.execute {
             val result = runCatching {
                 PlaybackResolver.open(application as App, episodes[next]).also { stream ->
@@ -778,7 +778,7 @@ class PlayerActivity : Activity() {
                             pendingIndex = -1
                             loadingBox.visibility = View.GONE
                             errorView.visibility = View.GONE
-                            Log.d(TAG, "prefetch handoff ep=${next + 1}")
+                            AppLog.d(TAG, "prefetch handoff ep=${next + 1}")
                             attach(stream, next, resume = false)
                         }
                         // 还是下一集：存起来等切换。
@@ -787,7 +787,7 @@ class PlayerActivity : Activity() {
                             prefetched = next to stream
                         }
                         else -> {
-                            Log.d(TAG, "discard stale prefetch ep=${next + 1}")
+                            AppLog.d(TAG, "discard stale prefetch ep=${next + 1}")
                             stream.close()
                         }
                     }
@@ -796,7 +796,7 @@ class PlayerActivity : Activity() {
                     prefetchCooldownUntil = SystemClock.elapsedRealtime() + 2_500
                     if (next == index && pendingIndex == next) {
                         pendingIndex = -1
-                        Log.d(TAG, "prefetch failed, fallback ep=${next + 1}")
+                        AppLog.d(TAG, "prefetch failed, fallback ep=${next + 1}")
                         play(next, resume = false)
                     }
                 }

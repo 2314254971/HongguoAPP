@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 package com.hongguo.mobile.player
 
+import android.os.SystemClock
 import com.hongguo.mobile.App
+import com.hongguo.mobile.data.AppLog
 import com.hongguotv.core.Rendition
 import com.hongguotv.core.RemoteVideo
 import java.io.Closeable
@@ -28,7 +30,15 @@ object PlaybackResolver {
      * 打开后读 MP4 头里的真实尺寸，拿不到就沿用接口给的宽高。
      */
     fun open(app: App, episodeId: String, maxQuality: Int = 1080): OpenedStream {
-        val ladder = app.repo.streamLadderWithCompatibility(episodeId)
+        val started = SystemClock.elapsedRealtime()
+        val ladder = try {
+            app.repo.streamLadderWithCompatibility(episodeId).also {
+                AppLog.d("HGResolve", "ladder ep=$episodeId n=${it.renditions.size} ${SystemClock.elapsedRealtime() - started}ms")
+            }
+        } catch (error: Exception) {
+            AppLog.w("HGResolve", "ladder failed ep=$episodeId ${error.javaClass.simpleName}: ${error.message}", error)
+            throw error
+        }
         val inRange = ladder.renditions.filter { it.quality in 1..maxQuality }
         val pool = (inRange.ifEmpty { ladder.renditions }).filter { rendition ->
             rendition.codec.lowercase() !in UNSUPPORTED
@@ -48,8 +58,14 @@ object PlaybackResolver {
                 val track = video.trackInfo()
                 val width = track?.width ?: rendition.width ?: 0
                 val height = track?.height ?: rendition.height ?: 0
+                AppLog.d(
+                    "HGResolve",
+                    "open ok ep=$episodeId ${rendition.quality}P ${rendition.codec} ${width}x$height " +
+                        "${SystemClock.elapsedRealtime() - started}ms",
+                )
                 return OpenedStream(video, rendition, width, height)
             } catch (problem: Exception) {
+                AppLog.w("HGResolve", "rendition failed ${rendition.quality}P ${rendition.codec}: ${problem.message}")
                 video.close()
                 last = problem
             }

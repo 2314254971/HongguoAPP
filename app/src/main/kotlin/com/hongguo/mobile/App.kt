@@ -3,6 +3,7 @@ package com.hongguo.mobile
 
 import android.app.Application
 import com.hongguo.mobile.data.AccountManager
+import com.hongguo.mobile.data.AppLog
 import com.hongguo.mobile.data.ImageLoader
 import com.hongguo.mobile.data.LocalLibrary
 import com.hongguotv.core.ContentRepository
@@ -25,6 +26,7 @@ class App : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        AppLog.init(this)
         repo = ContentRepository()
         library = LocalLibrary(this)
         account = AccountManager(this)

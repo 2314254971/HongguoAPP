@@ -13,6 +13,20 @@
   阻塞切换也计入样本；拖动进度落到窗口内立即触发；失败冷却 2.5 秒、每集最多 3 次。
 - `PrefetchPolicy` 抽出为纯逻辑并加 8 项单元测试。
 
+## 1.4.1（本次已做）
+
+现象：11 月中旬起解析失败，界面报 `End of input at character 0 of`（空正文直接交给 JSON 解析）。
+
+原因：官方播放接口改了口径，旧的 `video_tab` / 旧 POST 链路返回空正文；上游 0.16.5–0.16.6 已改为
+v5 签名 + 单集播放接口（`/novel/player/multi_video_model/player/v1`），并把签名从依赖 Android 运行时的实现
+改成纯 Kotlin。本仓库当时停在 11 月 11 日的上游快照，所以整条链路失效。
+
+处理：同步上游 `Signer`/`AesV3`/`PlayerSignature`/`MobilePlayback`/`V5Constants`/`PlaybackDeviceSession`/
+`PlayerSource`，播放入口切到 `MobilePlayback.ladder`；旧链路改名 `legacyStreamLadderWithCompatibility` 保留测试。
+真实接口验证：新链路返回 5 档清晰度，可正常播放。
+
+附加：新增本机日志 `Android/data/com.hongguo.mobile/files/logs/app.log` 与「我的 → 日志」分享入口。
+
 ## 1.4.0（本次已做）
 
 - 评论区从详情页搬到播放器：底部「评」按钮弹出半屏浮层，按当前集读取，游标分页 + 去重。

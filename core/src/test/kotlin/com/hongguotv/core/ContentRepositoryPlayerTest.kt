@@ -48,7 +48,8 @@ class ContentRepositoryPlayerTest {
             var compatibleRequests = 0
             val http = OkHttpClient.Builder().addInterceptor { chain ->
                 val request = chain.request()
-                val compatible = request.url.encodedPath == "/novel/player/video_model/v1/"
+                val compatible = request.url.host == "api3-normal-sinfonlinea.fqnovel.com" &&
+                request.url.encodedPath == "/novel/player/video_model/v1/"
                 if (compatible) compatibleRequests++
                 val body = if (compatible) JSONObject().put("code", 0).put("data", JSONObject().put("video_model",
                     JSONObject().put("video_list", list(
@@ -58,7 +59,7 @@ class ContentRepositoryPlayerTest {
                     .code(if (compatible) 200 else status).message("test").body(body.toResponseBody()).build()
             }.build()
             val repo = ContentRepository(http, playbackSession = PlaybackDeviceSession { DeviceRegister.Registered("333", "444") })
-            val ladder = repo.streamLadderWithCompatibility("123")
+            val ladder = repo.legacyStreamLadderWithCompatibility("123")
             assertEquals(1, compatibleRequests)
             assertEquals(2, ladder.renditions.size)
             assertEquals("https://example.com/avc", ladder.select(1080) { it.codec == "h264" }!!.url)
@@ -67,17 +68,49 @@ class ContentRepositoryPlayerTest {
         }
     }
 
-    @Test fun speculativeEmptyResponseNeverStartsCompatibilityRequests() {
+    @Test fun speculativeWithoutRegisteredDeviceNeverTouchesTheNetwork() {
         ContentRepository.deviceStore = FakeStore()
-        var compatibleRequests = 0
+        var requests = 0
         val http = OkHttpClient.Builder().addInterceptor { chain ->
-            if (chain.request().url.encodedPath == "/novel/player/video_model/v1/") compatibleRequests++
+            requests++
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
                 .code(200).message("test").body("".toResponseBody()).build()
         }.build()
         val repo = ContentRepository(http, playbackSession = PlaybackDeviceSession { DeviceRegister.Registered("333", "444") })
-        assertThrows(EmptyPlaybackResponseException::class.java) { repo.streamLadderWithCompatibility("123", speculative = true) }
-        assertEquals(0, compatibleRequests)
+        assertThrows(IOException::class.java) { repo.streamLadderWithCompatibility("123", speculative = true) }
+        assertEquals(0, requests)
+    }
+
+    @Test fun mobileLadderUsesSignedSingleVideoEndpoint() {
+        ContentRepository.deviceStore = FakeStore()
+        var path = ""
+        var signed = false
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request()
+            path = request.url.encodedPath
+            signed = request.headers.names().any { it.lowercase().startsWith("x-") } &&
+                request.url.queryParameter("_rticket") != null
+            val body = JSONObject().put("code", 0).put(
+                "data",
+                JSONObject().put(
+                    "1004",
+                    JSONObject().put(
+                        "123",
+                        JSONObject().put(
+                            "video_model",
+                            JSONObject().put("video_list", list(entry(854, "h264", "https://example.com/mobile", 480))),
+                        ),
+                    ),
+                ),
+            ).toString()
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("test").body(body.toResponseBody()).build()
+        }.build()
+        val repo = ContentRepository(http, playbackSession = PlaybackDeviceSession { DeviceRegister.Registered("333", "444") })
+        val ladder = repo.streamLadderWithCompatibility("123")
+        assertEquals("/novel/player/multi_video_model/player/v1", path)
+        assertTrue(signed)
+        assertEquals("https://example.com/mobile", ladder.select(1080) { it.codec == "h264" }!!.url)
     }
 
     @Test fun shortplayModelListResolvesWithoutAnyFallbackCall() {
