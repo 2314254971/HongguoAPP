@@ -67,8 +67,12 @@ hongguo-mobile/
 ## 播放解析
 
 播放走官方移动端的单集播放接口（`/novel/player/multi_video_model/player/v1`），请求使用 v5 签名。
-2026-11-16 上游把该签名从 Java/Android 依赖改为纯 Kotlin 实现，解析失败时不再返回无法解析的空正文，
-本仓库 1.4.1 已同步：`Signer`/`AesV3`/`PlayerSignature`/`MobilePlayback`/`V5Constants`。
+解析失败时按以下顺序回退（1.4.2 同步自上游 0.16.12/0.16.13）：
+
+1. 主接口空正文 → 用同一匿名身份、v5 签名的 `video_tab` GET（空字节摘要，不带 POST 专用头）；
+2. 备用接口只给 `bytevc2`（手机/电视解不了）→ 换备用域名重新请求主接口；
+3. 两条都空 → 保留两份诊断信息后报错，不把无法解析的空正文交给 JSON。
+
 旧签名链路保留为 `legacyStreamLadderWithCompatibility`，仅供回归测试。
 
 ## 自动构建与发布

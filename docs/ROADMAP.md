@@ -13,6 +13,17 @@
   阻塞切换也计入样本；拖动进度落到窗口内立即触发；失败冷却 2.5 秒、每集最多 3 次。
 - `PrefetchPolicy` 抽出为纯逻辑并加 8 项单元测试。
 
+## 1.4.2（本次已做）
+
+现象：11 月下旬起所有剧集都报“播放接口暂时返回空响应”，主接口对任何 id 都返回空正文。
+
+上游 0.16.12/0.16.13 的处置：主接口空正文时改用 v5 签名的 `video_tab` GET（空字节摘要、去掉 POST 专用头），
+备用接口只给 `bytevc2` 时换备用域名重试主接口，两条都空时保留诊断再报错。
+
+本仓库同步：`MobilePlayback`（`videoTabRequest` + 备用域名）、`PlaybackDeviceSession`（空模型暂停预解析）、
+`PlaybackRequestTrace`（超时归类），`ContentRepository` 增加回退链与诊断。
+实测 5 部剧全部恢复，最高 1080P。
+
 ## 1.4.1（本次已做）
 
 现象：11 月中旬起解析失败，界面报 `End of input at character 0 of`（空正文直接交给 JSON 解析）。

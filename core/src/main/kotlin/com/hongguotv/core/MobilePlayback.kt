@@ -21,6 +21,7 @@ internal fun interface MobilePlaybackSigner {
 }
 
 internal object MobilePlayback {
+    private const val PRIMARY_MODEL_HOST = "api5-normal-sinfonlinea.fqnovel.com"
     private val v5Signer = Signer(mobileV5 = true)
     val signer = MobilePlaybackSigner { url, body, _ ->
         val parsed = url.toHttpUrl()
@@ -30,17 +31,55 @@ internal object MobilePlayback {
         MobileSignedRequest(request.url, request.headers)
     }
 
-    fun ladder(id: String, device: Map<String, String>, http: OkHttpClient,
-               signer: MobilePlaybackSigner, now: Long): StreamLadder {
-        require(id.matches(Regex("[0-9]{1,30}")))
-        RequestScope.ensureActive()
-        val query = linkedMapOf("aid" to "8662", "app_name" to "novelread",
+    private fun query(device: Map<String, String>) =
+        linkedMapOf("aid" to "8662", "app_name" to "novelread",
             "version_code" to "74332", "version_name" to "7.4.3.32",
             "channel" to "vivo_8662_64", "device_platform" to "android",
             "device_type" to "PGT-AN10", "os_version" to "12", "update_version_code" to "74332",
             "iid" to device.getValue("iid"), "cdid" to device.getValue("cdid"),
-            "device_id" to device.getValue("device_id"), "_rticket" to now.toString())
-        val url = "https://api5-normal-sinfonlinea.fqnovel.com/novel/player/multi_video_model/player/v1"
+            "device_id" to device.getValue("device_id"))
+
+    /** The player GET also requires v5, including MD5(empty) rather than a zero body digest.
+     * Wire profile verified against hongguo-drama 92df757 and hongguo-tv 9e7386f.
+     */
+    fun videoTabRequest(id: String, device: Map<String, String>, host: String, now: Long,
+                        signing: MobilePlaybackSigner = signer): Request.Builder {
+        require(id.matches(Regex("[0-9]{1,30}")))
+        RequestScope.ensureActive()
+        val values = query(device) + linkedMapOf(
+            "video_id" to id, "video_id_type" to "0", "device_level" to "1",
+            "need_all_video_definition" to "1", "need_mp4_align" to "0", "use_os_player" to "0",
+            "video_platform" to "1024", "source" to "0", "from_video_id" to "", "_rticket" to now.toString(),
+        )
+        val url = "https://$host/reading/bookapi/video_tab/multi_video_model/v1/"
+            .toHttpUrl().newBuilder().apply { values.forEach { (k, v) -> addQueryParameter(k, v) } }.build()
+        val signed = signing.sign(url.toString(), ByteArray(0), device)
+        RequestScope.ensureActive()
+        return Request.Builder().url(signed.url).get()
+            .header("User-Agent", "com.phoenix.read/73932 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)")
+            .header("Accept", "application/json; charset=utf-8")
+            .header("Accept-Language", "zh-CN,zh;q=0.9")
+            .apply {
+                signed.headers.forEach { (k, v) -> header(k, v) }
+                // Empty bytes are signing input only: the GET has no body or POST headers.
+                removeHeader("x-ss-stub")
+                removeHeader("Content-Type")
+                removeHeader("Content-Encoding")
+            }
+    }
+
+    fun ladder(
+        id: String,
+        device: Map<String, String>,
+        http: OkHttpClient,
+        signer: MobilePlaybackSigner,
+        now: Long,
+        host: String = PRIMARY_MODEL_HOST,
+    ): StreamLadder {
+        require(id.matches(Regex("[0-9]{1,30}")))
+        RequestScope.ensureActive()
+        val query = query(device) + ("_rticket" to now.toString())
+        val url = "https://$host/novel/player/multi_video_model/player/v1"
             .toHttpUrl().newBuilder().apply { query.forEach { (k,v) -> addQueryParameter(k,v) } }.build()
         // TV uses platform decoders, not the official app's bytevc2 decoder.
         // Level 3 can return only bytevc2; level 1 negotiates compatible renditions.
@@ -65,9 +104,15 @@ internal object MobilePlayback {
             if (body.contentLength() > limit) throw IOException("播放信息过大")
             val source = body.source()
             source.request(limit + 1)
-            if (source.buffer.size > limit) throw IOException("播放信息过大")
+            val bytesRead = source.buffer.size
+            if (bytesRead > limit) throw IOException("播放信息过大")
             val text = source.readUtf8()
-            if (text.isBlank()) throw EmptyPlaybackResponseException("stage=mobile-model")
+            if (text.isBlank()) {
+                if (!response.header("Retry-After").isNullOrBlank()) throw PlaybackServiceBackoffException()
+                throw EmptyPlaybackResponseException("stage=mobile-model").apply {
+                    addSuppressed(PlaybackDiagnosticException("mobile-model=${response.code}/${bytesRead}B"))
+                }
+            }
             val root = try { JSONObject(text) } catch (_: Exception) {
                 throw PlaybackSourceException(PlaybackSourceException.Reason.INVALID_RESPONSE)
             }
