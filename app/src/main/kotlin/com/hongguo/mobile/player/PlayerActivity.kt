@@ -113,6 +113,7 @@ class PlayerActivity : Activity() {
     private val app get() = application as App
     private val timedComments by lazy { TimedComments(app.http) }
     private var danmakuEnabled = true
+    private var danmakuSize = DEFAULT_DANMAKU_SIZE
     private var danmakuEpisode = ""
     private var danmakuTone = 0
     private lateinit var videoBox: FrameLayout
@@ -151,6 +152,7 @@ class PlayerActivity : Activity() {
 
         playbackSpeed = playerPrefs.getFloat(KEY_SPEED, 1f).coerceIn(0.5f, 2f)
         danmakuEnabled = playerPrefs.getBoolean(KEY_DANMAKU, true)
+        danmakuSize = playerPrefs.getInt(KEY_DANMAKU_SIZE, DEFAULT_DANMAKU_SIZE)
         buildViews()
         initPlayer()
         play(index, resume = true)
@@ -173,7 +175,10 @@ class PlayerActivity : Activity() {
             setShutterBackgroundColor(Color.BLACK)
         }
         videoBox.addView(playerView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-        danmakuView = DanmakuView(this).apply { danmakuOn = danmakuEnabled }
+        danmakuView = DanmakuView(this).apply {
+            danmakuOn = danmakuEnabled
+            setTextSizeSp(danmakuSize)
+        }
         videoBox.addView(danmakuView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
 
         val overlay = FrameLayout(this)
@@ -284,6 +289,10 @@ class PlayerActivity : Activity() {
             setPadding(dp(12), dp(6), dp(12), dp(6))
             setTextColor(if (danmakuEnabled) getColor(R.color.accent) else Color.WHITE)
             setOnClickListener { toggleDanmaku() }
+            setOnLongClickListener {
+                showDanmakuSizePicker()
+                true
+            }
         }
         controls.addView(danmakuButton, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         speedButton = TextView(this).apply {
@@ -336,7 +345,7 @@ class PlayerActivity : Activity() {
         overlay.addView(errorView, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.CENTER))
 
         val hint = TextView(this).apply {
-            text = "上下滑动切换集数 · 右上角可切横屏"
+            text = "上下滑动切换集数 · 右上角切横屏 · 长按「弹」调字号"
             setTextColor(Color.parseColor("#B3FFFFFF"))
             textSize = 12f
         }
@@ -804,6 +813,22 @@ class PlayerActivity : Activity() {
         }
     }
 
+    private fun showDanmakuSizePicker() {
+        val sizes = DANMAKU_SIZES
+        val labels = arrayOf("小（16）", "标准（18）", "大（21）", "特大（24）")
+        val checked = sizes.indexOf(danmakuSize).coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("弹幕字号")
+            .setSingleChoiceItems(labels, checked) { dialog, which ->
+                danmakuSize = sizes[which]
+                playerPrefs.edit().putInt(KEY_DANMAKU_SIZE, danmakuSize).apply()
+                danmakuView.setTextSizeSp(danmakuSize)
+                dialog.dismiss()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
     private fun toggleDanmaku() {
         danmakuEnabled = !danmakuEnabled
         danmakuView.danmakuOn = danmakuEnabled
@@ -1134,6 +1159,9 @@ class PlayerActivity : Activity() {
         const val EXTRA_START_POSITION = "start_position"
         private const val KEY_SPEED = "speed"
         private const val KEY_DANMAKU = "danmaku"
+        private const val KEY_DANMAKU_SIZE = "danmaku_size"
+        private const val DEFAULT_DANMAKU_SIZE = 18
+        private val DANMAKU_SIZES = listOf(16, 18, 21, 24)
         private const val TAG = "HGPlayer"
     }
 }
