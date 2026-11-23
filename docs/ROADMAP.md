@@ -13,6 +13,18 @@
   阻塞切换也计入样本；拖动进度落到窗口内立即触发；失败冷却 2.5 秒、每集最多 3 次。
 - `PrefetchPolicy` 抽出为纯逻辑并加 8 项单元测试。
 
+## 1.5.1（本次已做）
+
+正式签名：
+
+- 生成专用 keystore（RSA 4096 / 10000 天 / CN=Hongguo Mobile），本地保存在 `keystore/`，已 gitignore；
+- `app/build.gradle.kts` 增加 `signingConfigs.release`，有 `keystore.properties` 时生效；
+- CI 从 `KEYSTORE_BASE64` 等 Secrets 还原密钥，tag 构建 release 包并用 `apksigner` 校验；
+  未配密钥时分支构 debug，打 tag 直接失败，避免误发调试包；
+- 产物体积 8.1 MB（原 debug 9.4 MB），`debuggable` 关闭。
+
+一次性迁移：旧版是 Android Debug 证书，新包需卸载重装；卸载会清本地收藏/历史/登录态，云端数据重新登录后可拉回。
+
 ## 1.5.0（本次已做）
 
 弹幕可读性按上游电视版参数重做：

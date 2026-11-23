@@ -77,6 +77,17 @@ hongguo-mobile/
 
 旧签名链路保留为 `legacyStreamLadderWithCompatibility`，仅供回归测试。
 
+## 签名
+
+正式包使用项目专用 keystore 签 release 构建，不再使用 Android Debug 证书：
+
+- 本地：`keystore/hongguo-mobile.jks`，密码写在 `keystore.properties`（两者都已 gitignore）；
+- CI：从仓库 Secrets 的 `KEYSTORE_BASE64` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD` 还原；
+  缺少密钥时普通分支只构 debug 包，**打 tag 会直接报错**，避免误发调试签名包；
+- 本地构建：`./gradlew :app:assembleRelease`，产物在 `app/build/outputs/apk/release/`。
+
+keystore 丢了的后果：以后的新包无法覆盖安装，只能卸载重装。请备份 `keystore/` 目录与密码。
+
 ## 自动构建与发布
 
 `.github/workflows/android.yml`：push / PR 跑单元测试并构建 APK 作为 artifact；

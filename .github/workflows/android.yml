@@ -45,22 +45,57 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
+      - name: Restore signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+              echo "::error::缺少 KEYSTORE_BASE64，无法构建正式签名包"
+              exit 1
+            fi
+            echo "未配置签名密钥，本次只构建 debug 包"
+            exit 0
+          fi
+          mkdir -p keystore
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > keystore/hongguo-mobile.jks
+          printf 'storeFile=keystore/hongguo-mobile.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > keystore.properties
+          echo "签名密钥已就绪"
+
       - name: Unit tests
         run: ./gradlew :core:test :app:testDebugUnitTest --no-daemon --console=plain
 
-      - name: Build debug APK
-        run: ./gradlew :app:assembleDebug --no-daemon --console=plain
+      - name: Build APK
+        run: |
+          if [ -f keystore.properties ]; then
+            ./gradlew :app:assembleRelease --no-daemon --console=plain
+            echo "APK_PATH=app/build/outputs/apk/release/app-release.apk" >> "$GITHUB_ENV"
+          else
+            ./gradlew :app:assembleDebug --no-daemon --console=plain
+            echo "APK_PATH=app/build/outputs/apk/debug/app-debug.apk" >> "$GITHUB_ENV"
+          fi
 
       - name: Package artifact
         id: apk
         run: |
           VERSION=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
           NAME="hongguo-mobile-${VERSION}.apk"
-          cp app/build/outputs/apk/debug/app-debug.apk "$NAME"
+          cp "$APK_PATH" "$NAME"
           sha256sum "$NAME" > SHA256SUMS.txt
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Built $NAME"
+
+
+      - name: Verify APK signature
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          "$SDK_ROOT/build-tools/36.0.0/apksigner" verify --print-certs "${{ steps.apk.outputs.name }}"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
