@@ -24,6 +24,19 @@ class App : Application() {
     val http: OkHttpClient
         get() = repo.http
 
+    /** 取流优先走登录态：官方接口把匿名设备判成不可信时会返回空包。 */
+    val playbackHttp: OkHttpClient by lazy {
+        repo.http.newBuilder().addInterceptor { chain ->
+            val cookie = account.credentials?.cookie
+            val host = chain.request().url.host
+            if (!cookie.isNullOrBlank() && (host.endsWith("fqnovel.com") || host.endsWith("snssdk.com"))) {
+                chain.proceed(chain.request().newBuilder().header("Cookie", cookie).build())
+            } else {
+                chain.proceed(chain.request())
+            }
+        }.build()
+    }
+
     override fun onCreate() {
         super.onCreate()
         AppLog.init(this)

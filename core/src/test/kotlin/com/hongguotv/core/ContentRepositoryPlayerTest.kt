@@ -108,7 +108,7 @@ class ContentRepositoryPlayerTest {
         }.build()
         val repo = ContentRepository(http, playbackSession = PlaybackDeviceSession { DeviceRegister.Registered("333", "444") })
         val ladder = repo.streamLadderWithCompatibility("123")
-        assertEquals("/novel/player/multi_video_model/player/v1", path)
+        assertEquals("/novel/player/multi_video_model/preload/v1", path)
         assertTrue(signed)
         assertEquals("https://example.com/mobile", ladder.select(1080) { it.codec == "h264" }!!.url)
     }

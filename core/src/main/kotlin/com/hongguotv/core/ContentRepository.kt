@@ -859,23 +859,24 @@ constructor(
         id: String,
         metadataAhead: List<String> = emptyList(),
         speculative: Boolean = false,
+        transport: OkHttpClient = http,
         onPrimaryEmpty: (() -> Unit)? = null,
     ): StreamLadder =
         RequestScope.withDeadline(System.nanoTime() + TimeUnit.SECONDS.toNanos(if (speculative) 2 else 8)) {
             val profile = if (speculative) playbackSession.existing()
                 ?: throw IOException("播放设备尚未就绪") else playbackSession.profile(http)
             try {
-                MobilePlayback.ladder(id, profile.values, http, MobilePlayback.signer, clock())
+                MobilePlayback.ladder(id, profile.values, transport, MobilePlayback.signer, clock())
                     .also { profile.recordPlayablePrimaryModel() }
             } catch (empty: EmptyPlaybackResponseException) {
                 profile.recordEmptyPrimaryModel(clock())
                 if (speculative) throw empty
                 RequestScope.ensureActive()
                 onPrimaryEmpty?.invoke()
-                val transport = http.newBuilder().cookieJar(CookieJar.NO_COOKIES).build()
+                val anonymous = transport.newBuilder().cookieJar(CookieJar.NO_COOKIES).build()
                 val trace = PlaybackRequestTrace()
                 val entry = try {
-                    tabVideoModel(id, profile, trace, transport, strict = true, mobileV5 = true)
+                    tabVideoModel(id, profile, trace, anonymous, strict = true, mobileV5 = true)
                 } catch (_: EmptyPlaybackResponseException) {
                     throw EmptyPlaybackResponseException(empty.detail, allPlaybackModelsEmpty = true).apply {
                         addSuppressed(empty)
@@ -903,7 +904,7 @@ constructor(
                 val alternateHost = PlayRetryPlan.host(0)
                 try {
                     MobilePlayback.ladder(
-                        id, profile.values, http, MobilePlayback.signer, clock(), host = alternateHost,
+                        id, profile.values, transport, MobilePlayback.signer, clock(), host = alternateHost,
                     )
                 } catch (alternate: IOException) {
                     RequestScope.ensureActive()

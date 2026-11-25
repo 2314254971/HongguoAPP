@@ -31,8 +31,9 @@ object PlaybackResolver {
      */
     fun open(app: App, episodeId: String, maxQuality: Int = 1080): OpenedStream {
         val started = SystemClock.elapsedRealtime()
+        val transport = if (app.account.isLoggedIn) app.playbackHttp else app.http
         val ladder = try {
-            app.repo.streamLadderWithCompatibility(episodeId).also {
+            app.repo.streamLadderWithCompatibility(episodeId, transport = transport).also {
                 AppLog.d("HGResolve", "ladder ep=$episodeId n=${it.renditions.size} ${SystemClock.elapsedRealtime() - started}ms")
             }
         } catch (error: Exception) {

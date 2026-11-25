@@ -50,6 +50,7 @@ import com.hongguo.mobile.data.CommentPages
 import com.hongguo.mobile.data.LocalLibrary
 import com.hongguo.mobile.ui.CommentAdapter
 import com.hongguo.mobile.ui.dp
+import com.hongguotv.core.EmptyPlaybackResponseException
 import com.hongguotv.core.TimedComments
 import java.util.concurrent.Executors
 import kotlin.math.abs
@@ -527,7 +528,7 @@ class PlayerActivity : Activity() {
                 }
                     .onFailure {
                         loadingBox.visibility = View.GONE
-                        showError(it.message ?: "播放失败，点此重试")
+                        showError(it.playbackMessage())
                     }
             }
         }
@@ -610,6 +611,8 @@ class PlayerActivity : Activity() {
         if (next >= episodes.size) return
         if (prefetched?.first == next || prefetchingIndex == next) return
         if (!::player.isInitialized) return
+        // 取流空响应期间暂停预解析，避免把限流拖得更久。
+        if (app.repo.shouldDeferPlaybackPrefetch()) return
         val duration = player.duration
         if (duration <= 0 || duration == C.TIME_UNSET) return
         val remaining = duration - player.currentPosition
@@ -654,6 +657,12 @@ class PlayerActivity : Activity() {
     }
 
     // ---------------- 交互 ----------------
+
+    private fun Throwable.playbackMessage(): String = when (this) {
+        is EmptyPlaybackResponseException ->
+            "播放接口返回空响应，服务器暂时限制了匿名取流。可先在官方 App 播放一集后再试，或稍后重试"
+        else -> message ?: "播放失败，点此重试"
+    }
 
     private fun showError(message: String) {
         errorView.text = "$message\n（点击重试）"
