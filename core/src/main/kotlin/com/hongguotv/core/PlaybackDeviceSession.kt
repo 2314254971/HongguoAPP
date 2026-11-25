@@ -4,9 +4,11 @@ package com.hongguotv.core
 import java.io.IOException
 import java.io.InterruptedIOException
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 import okhttp3.CookieJar
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
@@ -142,27 +144,62 @@ class PlaybackDeviceSession(
             }
         if (!validDevice(device)) throw PlaybackDeviceRegistrationException()
         if (Thread.currentThread().isInterrupted) throw InterruptedIOException("播放请求已取消")
+        activate(http, device)
+        runCatching {
+            java.io.File(System.getProperty("java.io.tmpdir"), "hg_identity.txt").writeText(
+                listOf(device.deviceId, device.installId, device.egdi, device.cookies.toString())
+                    .joinToString("\n")
+            )
+        }
         return device
+    }
+
+    /**
+     * 官方注册后的匿名设备激活（`app_alert_check`）。未激活的设备在播放接口上会被
+     * 当作低质量设备：要么 200 + 0 字节，要么 101000。失败不阻断取流。
+     */
+    private fun activate(http: OkHttpClient, device: DeviceRegister.Registered) {
+        if (device.egdi.isBlank()) return
+        val url = "https://log5-applog-lf.fqnovel.com/service/2/app_alert_check/"
+            .toHttpUrl().newBuilder()
+            .addQueryParameter("aid", "8662").addQueryParameter("app_name", "novelread")
+            .addQueryParameter("channel", "update_64")
+            .addQueryParameter("device_id", device.deviceId)
+            .addQueryParameter("iid", device.installId)
+            .addQueryParameter("device_platform", "android").addQueryParameter("os", "android")
+            .addQueryParameter("version_code", "73932").addQueryParameter("version_name", "7.3.9.32")
+            .addQueryParameter("_rticket", System.currentTimeMillis().toString())
+            .build()
+        val request = Request.Builder().url(url)
+            .header("User-Agent", VendorConstants.APP_UA).header("Accept", "application/json").get().build()
+        runCatching {
+            http.newBuilder().cookieJar(CookieJar.NO_COOKIES)
+                .callTimeout(3, TimeUnit.SECONDS).build()
+                .newCall(request).execute().use { response -> response.body?.string() }
+        }
     }
 
     private fun validDevice(device: DeviceRegister.Registered) =
         validId.matches(device.deviceId) && validId.matches(device.installId)
 
-    private fun toProfile(device: DeviceRegister.Registered): Profile =
-        Profile(
-            VendorConstants.device +
-                mapOf(
-                    "device_id" to device.deviceId,
-                    "iid" to device.installId,
-                    "cdid" to cdid,
-                ),
+    private fun toProfile(device: DeviceRegister.Registered): Profile {
+        val cookie =
             device.cookies
                 .filterKeys {
                     it in setOf("install_id", "ttreq", "store-region", "store-region-src")
                 }
                 .entries
-                .joinToString("; ") { (name, value) -> "$name=$value" },
-        )
+                .joinToString("; ") { (name, value) -> "$name=$value" }
+        val values =
+            VendorConstants.device + buildMap {
+                put("device_id", device.deviceId)
+                put("iid", device.installId)
+                put("cdid", cdid)
+                put("cookie", cookie)
+                if (device.egdi.isNotBlank()) put("klink_egdi", device.egdi)
+            }
+        return Profile(values, cookie)
+    }
 }
 
 private val validId = Regex("[1-9][0-9]{0,29}")

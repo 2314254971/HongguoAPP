@@ -65,6 +65,8 @@ object DeviceRegister {
         val newUser: Boolean = false,
         /** `Set-Cookie` 里可直接回写的那几项（`install_id` / `ttreq` / `store-region` …）。 */
         val cookies: Map<String, String> = emptyMap(),
+        /** 注册下发的不透明设备标识；官方播放 query 带它，缺了会按「画像不完整」回空包。 */
+        val egdi: String = "",
     )
 
     /**
@@ -237,6 +239,8 @@ object DeviceRegister {
             json.optString("device_token", ""),
             json.optInt("new_user", 0) == 1,
             cookies,
+            json.opt("klink_egdi")?.toString()?.takeIf { it.isNotBlank() }
+                ?: json.optJSONObject("data")?.opt("klink_egdi")?.toString().orEmpty(),
         )
     }
 }

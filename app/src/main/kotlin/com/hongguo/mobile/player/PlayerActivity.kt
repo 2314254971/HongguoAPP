@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 package com.hongguo.mobile.player
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.graphics.Color
@@ -26,6 +28,8 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.SeekBar
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.TextView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -36,6 +40,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -92,6 +97,10 @@ class PlayerActivity : Activity() {
     private lateinit var errorView: TextView
 
     private lateinit var player: ExoPlayer
+    private var webResolver: WebView? = null
+    private var webResolving = false
+    /** 原生接口被判不可信后，本次会话后续剧集直接走网页解析，避免反复空请求。 */
+    private var webOnly = false
     private var lastSavedAt = 0L
     private val playerPrefs by lazy { getSharedPreferences("player_prefs", MODE_PRIVATE) }
 
@@ -467,6 +476,7 @@ class PlayerActivity : Activity() {
         danmakuEpisode = ""
         danmakuView.clear()
         hideComments()
+        finishWebResolver()
         commentEpisode = ""
         commentPager = null
         commentLoadingPage = false
@@ -509,6 +519,7 @@ class PlayerActivity : Activity() {
         val startedAt = SystemClock.elapsedRealtime()
         io.execute {
             val result = runCatching {
+                if (webOnly) throw java.io.IOException("网页模式")
                 PlaybackResolver.open(application as App, episodeId)
             }
             val elapsed = SystemClock.elapsedRealtime() - startedAt
@@ -527,11 +538,111 @@ class PlayerActivity : Activity() {
                     attach(it, newIndex, resume)
                 }
                     .onFailure {
-                        loadingBox.visibility = View.GONE
-                        showError(it.playbackMessage())
+                        AppLog.d(TAG, "native resolve failed ep=${newIndex + 1}: ${it.message}")
+                        webOnly = true
+                        resolveViaWeb(newIndex, it)
                     }
             }
         }
+    }
+
+    /**
+     * 官方 App 接口把第三方设备判成不可信时（200 空包 / 101000），
+     * 用官方网页版解析本集的直链 MP4：网页在同一台设备上仍可播放。
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun resolveViaWeb(newIndex: Int, cause: Throwable) {
+        if (webResolving) return
+        val episodeId = episodes.getOrNull(newIndex)
+        if (episodeId.isNullOrBlank()) {
+            showError(cause.playbackMessage())
+            return
+        }
+        webResolving = true
+        errorView.visibility = View.GONE
+        loadingBox.visibility = View.VISIBLE
+        val web = WebView(this).apply {
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.mediaPlaybackRequiresUserGesture = false
+            settings.userAgentString = WEB_UA
+            setBackgroundColor(Color.BLACK)
+            isFocusable = false
+            isClickable = false
+            webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    view?.let { pollWebSource(it, 0) }
+                }
+            }
+        }
+        webResolver = web
+        web.alpha = 0.01f
+        root.addView(web, 0, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        AppLog.d(TAG, "web resolve ep=${newIndex + 1} id=$episodeId")
+        web.loadUrl("https://hongguoduanju.com/player/$seriesId/$episodeId")
+        handler.postDelayed({
+            if (webResolving && webResolver === web) {
+                finishWebResolver()
+                showWebFailure(index)
+            }
+        }, 30_000)
+    }
+
+    private fun pollWebSource(web: WebView, attempt: Int) {
+        if (!webResolving || webResolver !== web) return
+        web.evaluateJavascript(
+            "(function(){var v=document.querySelector('video');if(!v)return '';" +
+                "try{v.muted=true;v.play()}catch(e){};return v.currentSrc||''})()",
+        ) { raw ->
+            val url = raw?.trim('"')?.replace("\\/", "/").orEmpty()
+            if (url.startsWith("http")) {
+                finishWebResolver()
+                attachDirect(url)
+            } else if (attempt < 60) {
+                handler.postDelayed({ pollWebSource(web, attempt + 1) }, 500)
+            } else {
+                finishWebResolver()
+                showWebFailure(index)
+            }
+        }
+    }
+
+    private fun showWebFailure(newIndex: Int) {
+        val url = "https://hongguoduanju.com/player/$seriesId/${episodes.getOrNull(newIndex).orEmpty()}"
+        AlertDialog.Builder(this)
+            .setTitle("网页解析失败")
+            .setMessage("可以改用浏览器打开官方页面观看本集。")
+            .setPositiveButton("浏览器打开") { _, _ ->
+                runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+            }
+            .setNegativeButton("重试") { _, _ -> play(newIndex, resume = true) }
+            .show()
+    }
+
+    private fun finishWebResolver() {
+        val web = webResolver ?: return
+        webResolver = null
+        webResolving = false
+        (web.parent as? FrameLayout)?.removeView(web)
+        web.stopLoading()
+        web.destroy()
+    }
+
+    @androidx.annotation.OptIn(UnstableApi::class)
+    private fun attachDirect(url: String) {
+        opened?.close()
+        opened = null
+        val item = MediaItem.Builder().setUri(url).setMimeType(androidx.media3.common.MimeTypes.VIDEO_MP4).build()
+        val factory = DefaultHttpDataSource.Factory()
+            .setUserAgent(WEB_UA)
+            .setDefaultRequestProperties(mapOf("Referer" to "https://hongguoduanju.com/"))
+        player.setMediaSource(ProgressiveMediaSource.Factory(factory).createMediaSource(item))
+        player.setPlaybackSpeed(playbackSpeed)
+        player.prepare()
+        player.playWhenReady = true
+        loadingBox.visibility = View.GONE
+        updatePlayIcon()
+        AppLog.d(TAG, "web source ep=${index + 1} url=${url.take(80)}")
     }
 
     private fun attach(stream: OpenedStream, newIndex: Int, resume: Boolean) {
@@ -611,6 +722,7 @@ class PlayerActivity : Activity() {
         if (next >= episodes.size) return
         if (prefetched?.first == next || prefetchingIndex == next) return
         if (!::player.isInitialized) return
+        if (webOnly) return
         // 取流空响应期间暂停预解析，避免把限流拖得更久。
         if (app.repo.shouldDeferPlaybackPrefetch()) return
         val duration = player.duration
@@ -1136,6 +1248,7 @@ class PlayerActivity : Activity() {
         prefetched = null
         opened?.close()
         opened = null
+        finishWebResolver()
         if (::player.isInitialized) player.release()
         super.onDestroy()
     }
@@ -1160,6 +1273,9 @@ class PlayerActivity : Activity() {
     private fun toast(message: String) = android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_SHORT).show()
 
     companion object {
+        private const val WEB_UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+
         const val EXTRA_SERIES_ID = "series_id"
         const val EXTRA_TITLE = "series_title"
         const val EXTRA_COVER = "series_cover"

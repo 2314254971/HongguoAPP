@@ -36,15 +36,17 @@ internal object MobilePlayback {
     }
 
     private fun query(device: Map<String, String>, currentApp: Boolean = false): Map<String, String> =
-        if (currentApp) linkedMapOf("aid" to "8662", "app_name" to "novelread",
-            "version_code" to "74532", "version_name" to "7.4.5.32", "update_version_code" to "74532",
-            "manifest_version_code" to "74532", "os" to "android", "ssmix" to "a",
-            "channel" to "update_64", "device_platform" to "android", "device_type" to "25053RT47C",
-            "device_brand" to "Redmi", "os_version" to "16", "os_api" to "36",
-            "resolution" to "1280*2772", "dpi" to "520",
-            "ac" to "wifi", "language" to "zh", "host_abi" to "arm64-v8a",
-            "iid" to device.getValue("iid"), "cdid" to device.getValue("cdid"),
-            "device_id" to device.getValue("device_id")) else
+        if (currentApp) linkedMapOf(
+            "ac" to "wifi", "channel" to "update_64", "aid" to "8662", "app_name" to "novelread",
+            "version_code" to "71332", "version_name" to "7.1.3.32", "device_platform" to "android",
+            "os" to "android", "ssmix" to "a", "device_type" to "25053RT47C", "device_brand" to "Redmi",
+            "language" to "zh", "os_api" to "36", "os_version" to "16", "manifest_version_code" to "71332",
+            "resolution" to "1280*2772", "dpi" to "520", "update_version_code" to "71332",
+            "host_abi" to "arm64-v8a", "dragon_device_type" to "phone", "pv_player" to "71332",
+            "compliance_status" to "0", "need_personal_recommend" to "1", "player_so_load" to "1",
+            "is_android_pad_screen" to "0", "iid" to device.getValue("iid"),
+            "device_id" to device.getValue("device_id"),
+        ) + listOfNotNull(device["klink_egdi"]?.takeIf { it.isNotBlank() }?.let { "klink_egdi" to it }) else
         linkedMapOf("aid" to "8662", "app_name" to "novelread",
             "version_code" to "74332", "version_name" to "7.4.3.32",
             "channel" to "vivo_8662_64", "device_platform" to "android",
@@ -92,7 +94,8 @@ internal object MobilePlayback {
         require(id.matches(Regex("[0-9]{1,30}")))
         RequestScope.ensureActive()
         val currentApp = signer.currentAppProtocol
-        val query = query(device, currentApp) + ("_rticket" to now.toString())
+        val query = query(device, currentApp) +
+            ("ts" to (now / 1000).toString()) + ("_rticket" to now.toString())
         val origin = host ?: if (currentApp) "reading.snssdk.com" else PRIMARY_MODEL_HOST
         val endpoint = if (currentApp) "https://$origin/novel/player/multi_video_model/preload/v1"
             else "https://$origin/novel/player/multi_video_model/player/v1"
@@ -102,23 +105,26 @@ internal object MobilePlayback {
         // Level 3 can return only bytevc2; level 1 negotiates compatible renditions.
         val payload = JSONObject("""{"biz_param":{"detail_page_version":0,"device_level":1,"disable_digg_stat":false,"disable_video_relate_book":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$id"]},"dr_scene":"player"}""")
         if (currentApp) {
-            payload.getJSONObject("biz_param").put("device_level", 2)
-            payload.put("dr_scene", "preload")
+            payload.getJSONObject("biz_param").put("device_level", 1)
+            payload.put("dr_scene", "player")
         }
-        val output = ByteArrayOutputStream()
-        GZIPOutputStream(output).use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
-        val bytes = output.toByteArray()
+        val bytes = payload.toString().toByteArray(Charsets.UTF_8)
         val request = Request.Builder().url(url)
-            .header("User-Agent", if (currentApp) System.getProperty("http.agent", "okhttp/4.12.0") else
-                "com.phoenix.read/73932 (Linux; U; Android 12; zh_CN_#Hans; PGT-AN10; Build/V417IR;tt-ok/3.12.13.20)")
-            .header("Accept", "application/json").header("Content-Encoding", "gzip")
+            .header("User-Agent", if (currentApp)
+                "com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
+            else "com.phoenix.read/73932 (Linux; U; Android 12; zh_CN_#Hans; PGT-AN10; Build/V417IR;tt-ok/3.12.13.20)")
+            .header("Accept", "application/json; charset=utf-8,application/x-protobuf")
             .header("x-ss-stub", MessageDigest.getInstance("MD5").digest(bytes).joinToString("") { "%02X".format(it) })
+            .header("x-tt-request-tag", "t=0;n=0").header("x-tt-dt", "")
+            .header("passport-sdk-version", "50561").header("x-vc-bdturing-sdk-version", "3.7.2.cn")
+            .apply { device["cookie"]?.takeIf { it.isNotBlank() }?.let { header("Cookie", it) } }
         val signed = signer.sign(url.toString(), bytes, device)
         request.url(signed.url)
         signed.headers.forEach { (k,v) -> request.header(k,v) }
         RequestScope.ensureActive()
         request.post(bytes.toRequestBody("application/json; charset=utf-8".toMediaType()))
-        val transport = http.newBuilder().cookieJar(CookieJar.NO_COOKIES).build()
+        val transport = http.newBuilder().cookieJar(CookieJar.NO_COOKIES)
+            .protocols(listOf(okhttp3.Protocol.HTTP_1_1)).build()
         return RequestScope.execute(transport.newCall(request.build())) { response ->
             if (!response.isSuccessful) throw PlaybackSourceException(PlaybackSourceException.Reason.HTTP_REJECTED, response.code)
             val body = response.body ?: throw PlaybackSourceException(PlaybackSourceException.Reason.INVALID_RESPONSE)
@@ -138,7 +144,12 @@ internal object MobilePlayback {
             val root = try { JSONObject(text) } catch (_: Exception) {
                 throw PlaybackSourceException(PlaybackSourceException.Reason.INVALID_RESPONSE)
             }
-            PlaybackModels.checkStatus(root)
+            try {
+                PlaybackModels.checkStatus(root)
+            } catch (e: PlaybackSourceException) {
+                e.addSuppressed(PlaybackDiagnosticException("model-body=" + text.take(400)))
+                throw e
+            }
             val data = root.optJSONObject("data")
                 ?: throw PlaybackSourceException(PlaybackSourceException.Reason.INVALID_RESPONSE)
             val entries = data.optJSONObject("1004") ?: data
