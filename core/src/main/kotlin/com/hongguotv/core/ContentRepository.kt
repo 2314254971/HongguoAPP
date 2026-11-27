@@ -723,6 +723,7 @@ constructor(
 
     fun detail(id: String): Detail {
         require(id.matches(Regex("[0-9]{1,30}")))
+        appDetail(id)?.let { return it }
         val o =
             router("$site/detail?series_id=$id")
                 .optJSONObject("detail_page")
@@ -737,6 +738,55 @@ constructor(
             throw IOException("分集数据异常")
         return Detail(card(o).copy(id = id), episodes)
     }
+
+    /**
+     * App 详情接口：网页版 2026-11-27 起对匿名访问只返回 3 个 `v1_` 预览 token，
+     * 完整分集仍在 `POST /novel/player/video_detail/v1/` 里。用已注册设备身份取，
+     * 失败时再退回网页（网页若只有预览 token 会由调用方报“分集数据异常”）。
+     */
+    private fun appDetail(id: String): Detail? =
+        runCatching {
+            val profile = playbackSession.profile(http)
+            val values =
+                linkedMapOf(
+                    "aid" to "8662", "app_name" to "novelread",
+                    "version_code" to "73532", "version_name" to "7.3.5.32",
+                    "manifest_version_code" to "73532", "update_version_code" to "73532",
+                    "channel" to "update_64", "device_platform" to "android", "os" to "android",
+                    "ssmix" to "a", "device_type" to "25053RT47C", "device_brand" to "Redmi",
+                    "language" to "zh", "os_api" to "36", "os_version" to "16",
+                    "resolution" to "1280*2772", "dpi" to "520", "ac" to "wifi",
+                    "device_id" to profile.values.getValue("device_id"),
+                    "iid" to profile.values.getValue("iid"),
+                )
+            val body = """{"series_id":"$id"}""".toByteArray(Charsets.UTF_8)
+            val signed =
+                signer.sign(
+                    "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/video_detail/v1/",
+                    values, body, profile.values,
+                )
+            val root = JSONObject(text(signed.url, signed, retryTransient = true))
+            if (root.optInt("code", -1) != 0) return@runCatching null
+            val data = root.optJSONObject("data")?.optJSONObject("video_data") ?: return@runCatching null
+            val returned = data.str("series_id").ifEmpty { data.str("series_id_str") }
+            if (returned != id) return@runCatching null
+            val list = data.optJSONArray("video_list") ?: return@runCatching null
+            val byIndex = sortedMapOf<Int, String>()
+            for (i in 0 until list.length()) {
+                val row = list.optJSONObject(i) ?: continue
+                val vid = row.str("vid")
+                val episode = row.optInt("vid_index", 0)
+                if (episode <= 0 || !vid.matches(Regex("[0-9]{1,30}"))) return@runCatching null
+                val owner = row.str("series_id")
+                if (owner.isNotEmpty() && owner != id) return@runCatching null
+                if (byIndex.put(episode, vid) != null) return@runCatching null
+            }
+            if (byIndex.isEmpty()) return@runCatching null
+            val episodes = (1..byIndex.size).map { byIndex[it] ?: return@runCatching null }
+            val total = data.optInt("episode_cnt", data.optInt("episode_total_cnt", episodes.size))
+            if (total > episodes.size) return@runCatching null
+            Detail(card(data).copy(id = id), episodes)
+        }.getOrNull()
 
     /**
      * 官方 App 现行的播放模型接口：`GET /reading/bookapi/video_tab/multi_video_model/v1/`。

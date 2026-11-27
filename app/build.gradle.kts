@@ -21,8 +21,8 @@ android {
         applicationId = "com.hongguo.mobile"
         minSdk = 26
         targetSdk = 36
-        versionCode = 14
-        versionName = "1.5.3"
+        versionCode = 15
+        versionName = "1.5.4"
     }
 
     buildFeatures {
